@@ -1,36 +1,81 @@
 # AlphaFX AI
 
-Professional Smart Money Concepts indicator for TradingView.
+Professional Smart Money Concepts indicator for TradingView, written in Pine Script v6.
 
-## Current Version
+**Version:** 1.0.0  
+**Status:** Professional Release
 
-0.2.0-alpha
+## What it is
 
-## Status
+AlphaFX AI is a modular, confirmed-structure SMC toolkit — not a simple buy/sell signal script.
 
-Under Development
+It combines trend, market structure, BOS/CHoCH, order blocks, fair value gaps, liquidity, sessions, multi-timeframe confirmation, confluence confidence, and educational risk guidance.
 
-## Completed
+## Core principles
 
-- Trend Engine
-- Market Structure (confirmed swings, HH / HL / LH / LL)
-- BOS / CHoCH
-- Structure break lines
-- Structure break alerts
-- Dashboard (including Last Event)
+- Clean engine architecture
+- Confirmed pivots and closed-bar breaks
+- Non-repainting policy by design
+- Signal quality over signal quantity
+- Maintainable, documented Pine Script
 
-## Planned Features
+## Engines
 
-- Order Blocks
-- Fair Value Gaps
-- Liquidity Sweeps
-- Session Detection
-- Multi-Timeframe Engine
-- Confidence Scoring
-- Risk Management
+| Engine | Purpose |
+|--------|---------|
+| Trend | 20 / 50 / 200 EMA state |
+| Swing / Structure | Confirmed HH / HL / LH / LL |
+| BOS / CHoCH | Confirmed structure breaks |
+| Order Blocks | Last opposing candle before break |
+| Fair Value Gaps | Confirmed 3-candle imbalances |
+| Liquidity | EQH / EQL pools and sweeps |
+| Sessions | Asian / London / New York ranges |
+| Multi-Timeframe | Confirmed HTF trend alignment |
+| Confidence | Confluence score and grade |
+| Risk | Structure-based SL / TP / size model |
 
-## Files
+## Install (TradingView)
 
-- `pine/AlphaFX_AI.pine` — main TradingView indicator
-- `docs/CHANGELOG.md` — release notes
-- `VERSION` — current version string
+1. Open TradingView Pine Editor
+2. Paste contents of [`pine/AlphaFX_AI.pine`](pine/AlphaFX_AI.pine)
+3. Save and add to chart
+4. Configure inputs by engine group
+
+## Repository layout
+
+```text
+alphafx-ai/
+├── pine/AlphaFX_AI.pine
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── FEATURES.md
+│   ├── ROADMAP.md
+│   ├── BACKTESTING.md
+│   ├── CHANGELOG.md
+│   └── RELEASE.md
+├── tests/
+├── assets/
+├── README.md
+├── LICENSE
+└── VERSION
+```
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Features](docs/FEATURES.md)
+- [Roadmap](docs/ROADMAP.md)
+- [Backtesting / validation](docs/BACKTESTING.md)
+- [Changelog](docs/CHANGELOG.md)
+- [Release notes](docs/RELEASE.md)
+
+## Important notes
+
+- Confidence measures confluence quality, **not** win probability.
+- Risk levels are educational guidance, **not** broker execution.
+- This indicator does not place trades.
+- Past structure behavior does not guarantee future results.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

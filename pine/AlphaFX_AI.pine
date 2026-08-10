@@ -1,6 +1,6 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v1.0.0-rc]",
+    "AlphaFX AI [v1.0.0]",
     shorttitle = "AlphaFX AI",
     overlay = true,
     max_labels_count = 500,
@@ -10,8 +10,8 @@ indicator(
 
 //====================================================================
 // ALPHAFX AI
-// Version: 1.0.0-rc
-// Status: Professional Release Candidate
+// Version: 1.0.0
+// Status: Professional Release
 //
 // Product:
 // Commercial-quality Smart Money Concepts indicator for TradingView.
@@ -2730,7 +2730,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v1.0-rc",
+             "v1.0",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small

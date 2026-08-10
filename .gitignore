@@ -1,0 +1,10 @@
+.DS_Store
+.idea/
+.vscode/
+*.log
+*.tmp
+.env
+.env.*
+node_modules/
+.cursor/
+*.pine.bak
