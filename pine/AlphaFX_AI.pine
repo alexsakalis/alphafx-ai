@@ -1,15 +1,16 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v0.2.0-alpha]",
+    "AlphaFX AI [v0.3.0-alpha]",
     shorttitle = "AlphaFX AI",
     overlay = true,
     max_labels_count = 500,
-    max_lines_count = 100
+    max_lines_count = 100,
+    max_boxes_count = 100
 )
 
 //====================================================================
 // ALPHAFX AI
-// Version: 0.2.0-alpha
+// Version: 0.3.0-alpha
 //
 // Phase 1:
 // - EMA Trend Engine
@@ -25,11 +26,17 @@ indicator(
 // - Structure Break Alerts
 // - Last Event Dashboard Row
 //
+// Phase 3:
+// - Order Block Engine
+// - Mitigation / Invalidation
+// - OB Dashboard + Alerts
+//
 // Design:
 // - Confirmed structure only
 // - No future-looking data
 // - Breaks require closed-bar confirmation
-// - Foundation for OB / FVG / Liquidity modules
+// - OBs are derived only from confirmed BOS / CHoCH
+// - Foundation for FVG / Liquidity modules
 //====================================================================
 
 
@@ -40,6 +47,7 @@ indicator(
 string GROUP_TREND     = "Trend Engine"
 string GROUP_STRUCTURE = "Market Structure"
 string GROUP_BOS       = "BOS / CHoCH"
+string GROUP_OB        = "Order Blocks"
 string GROUP_VISUALS   = "Visuals"
 string GROUP_DASHBOARD = "Dashboard"
 
@@ -118,6 +126,48 @@ bool showBosChochLabels = input.bool(
      true,
      "Show BOS / CHoCH Labels",
      group = GROUP_BOS
+)
+
+
+//====================================================================
+// ORDER BLOCK INPUTS
+//====================================================================
+
+bool showOrderBlocks = input.bool(
+     true,
+     "Show Order Blocks",
+     group = GROUP_OB
+)
+
+bool createObFromChoch = input.bool(
+     true,
+     "Create OB from CHoCH",
+     tooltip = "When disabled, order blocks are created only from BOS events.",
+     group = GROUP_OB
+)
+
+int obLookback = input.int(
+     20,
+     "OB Candle Lookback",
+     minval = 1,
+     maxval = 100,
+     tooltip = "How far back to search for the last opposing candle before a structure break.",
+     group = GROUP_OB
+)
+
+int maxOrderBlocks = input.int(
+     8,
+     "Max Active Order Blocks",
+     minval = 1,
+     maxval = 50,
+     group = GROUP_OB
+)
+
+bool keepMitigatedOrderBlocks = input.bool(
+     true,
+     "Keep Mitigated Order Blocks",
+     tooltip = "When enabled, mitigated OBs stay visible with reduced opacity until invalidated.",
+     group = GROUP_OB
 )
 
 
@@ -607,11 +657,219 @@ if runBearishBreak and not swingLowConsumed
 
 
 //====================================================================
+// ORDER BLOCK ENGINE
+//====================================================================
+//
+// Bullish OB:
+// Last bearish candle before a confirmed bullish BOS / CHoCH.
+//
+// Bearish OB:
+// Last bullish candle before a confirmed bearish BOS / CHoCH.
+//
+// Lifecycle:
+// - Created only when a confirmed structure-break event fires
+// - Mitigated when price revisits the OB zone
+// - Invalidated when a confirmed close trades through the OB
+//
+// Non-repainting:
+// Creation is gated by Phase 2 confirmed events. Candle search uses
+// historical offsets only (no future bars).
+//====================================================================
+
+var array<box>   obBoxes       = array.new_box()
+var array<int>   obDirections  = array.new_int()
+var array<float> obTops        = array.new_float()
+var array<float> obBottoms     = array.new_float()
+var array<bool>  obMitigated   = array.new_bool()
+var array<int>   obCreatedBars = array.new_int()
+
+var string lastObEvent = "—"
+
+bool bullishObCreatedEvent     = false
+bool bearishObCreatedEvent     = false
+bool bullishObMitigatedEvent   = false
+bool bearishObMitigatedEvent   = false
+bool bullishObInvalidatedEvent = false
+bool bearishObInvalidatedEvent = false
+
+// Returns bars-ago offset of the most recent opposing candle.
+// wantBearishCandle = true  -> last down-close candle (bullish OB source)
+// wantBearishCandle = false -> last up-close candle (bearish OB source)
+findOpposingCandleOffset(bool wantBearishCandle, int lookbackBars) =>
+    int foundOffset = na
+    for i = 1 to lookbackBars
+        bool isBearishCandle = close[i] < open[i]
+        bool isBullishCandle = close[i] > open[i]
+        if wantBearishCandle and isBearishCandle
+            foundOffset := i
+            break
+        if not wantBearishCandle and isBullishCandle
+            foundOffset := i
+            break
+    foundOffset
+
+bool bullishStructureBreakEvent =
+     bullishBosEvent or
+     (createObFromChoch and bullishChochEvent)
+
+bool bearishStructureBreakEvent =
+     bearishBosEvent or
+     (createObFromChoch and bearishChochEvent)
+
+if bullishStructureBreakEvent
+    int bullishObOffset = findOpposingCandleOffset(true, obLookback)
+
+    if not na(bullishObOffset)
+        float bullishZoneTop = high[bullishObOffset]
+        float bullishZoneBottom = low[bullishObOffset]
+        int bullishZoneStart = bar_index - bullishObOffset
+
+        box bullishObBox = na
+        if showOrderBlocks
+            bullishObBox := box.new(
+                 bullishZoneStart,
+                 bullishZoneTop,
+                 bar_index,
+                 bullishZoneBottom,
+                 xloc = xloc.bar_index,
+                 border_color = color.new(bullishColor, 20),
+                 border_width = 1,
+                 bgcolor = color.new(bullishColor, 85),
+                 extend = extend.none
+            )
+
+        array.push(obBoxes, bullishObBox)
+        array.push(obDirections, 1)
+        array.push(obTops, bullishZoneTop)
+        array.push(obBottoms, bullishZoneBottom)
+        array.push(obMitigated, false)
+        array.push(obCreatedBars, bar_index)
+
+        while array.size(obBoxes) > maxOrderBlocks
+            box oldBox = array.get(obBoxes, 0)
+            if not na(oldBox)
+                box.delete(oldBox)
+            array.remove(obBoxes, 0)
+            array.remove(obDirections, 0)
+            array.remove(obTops, 0)
+            array.remove(obBottoms, 0)
+            array.remove(obMitigated, 0)
+            array.remove(obCreatedBars, 0)
+
+        lastObEvent := "Bullish OB"
+        bullishObCreatedEvent := true
+
+if bearishStructureBreakEvent
+    int bearishObOffset = findOpposingCandleOffset(false, obLookback)
+
+    if not na(bearishObOffset)
+        float bearishZoneTop = high[bearishObOffset]
+        float bearishZoneBottom = low[bearishObOffset]
+        int bearishZoneStart = bar_index - bearishObOffset
+
+        box bearishObBox = na
+        if showOrderBlocks
+            bearishObBox := box.new(
+                 bearishZoneStart,
+                 bearishZoneTop,
+                 bar_index,
+                 bearishZoneBottom,
+                 xloc = xloc.bar_index,
+                 border_color = color.new(bearishColor, 20),
+                 border_width = 1,
+                 bgcolor = color.new(bearishColor, 85),
+                 extend = extend.none
+            )
+
+        array.push(obBoxes, bearishObBox)
+        array.push(obDirections, -1)
+        array.push(obTops, bearishZoneTop)
+        array.push(obBottoms, bearishZoneBottom)
+        array.push(obMitigated, false)
+        array.push(obCreatedBars, bar_index)
+
+        while array.size(obBoxes) > maxOrderBlocks
+            box oldBox = array.get(obBoxes, 0)
+            if not na(oldBox)
+                box.delete(oldBox)
+            array.remove(obBoxes, 0)
+            array.remove(obDirections, 0)
+            array.remove(obTops, 0)
+            array.remove(obBottoms, 0)
+            array.remove(obMitigated, 0)
+            array.remove(obCreatedBars, 0)
+
+        lastObEvent := "Bearish OB"
+        bearishObCreatedEvent := true
+
+// Extend, mitigate, and invalidate active order blocks on confirmed bars.
+// Mitigation / invalidation start on the bar AFTER creation so the
+// displacement candle that printed the BOS / CHoCH cannot instantly
+// mitigate its own order block.
+if barstate.isconfirmed and array.size(obBoxes) > 0
+    for i = array.size(obBoxes) - 1 to 0
+        box activeBox = array.get(obBoxes, i)
+        int direction = array.get(obDirections, i)
+        float zoneTop = array.get(obTops, i)
+        float zoneBottom = array.get(obBottoms, i)
+        bool alreadyMitigated = array.get(obMitigated, i)
+        int createdBar = array.get(obCreatedBars, i)
+
+        if not na(activeBox)
+            box.set_right(activeBox, bar_index)
+
+        if bar_index > createdBar
+            bool isBullishOb = direction == 1
+            bool invalidated =
+                 isBullishOb ? close < zoneBottom : close > zoneTop
+
+            if invalidated
+                if isBullishOb
+                    bullishObInvalidatedEvent := true
+                else
+                    bearishObInvalidatedEvent := true
+
+                if not na(activeBox)
+                    box.delete(activeBox)
+                array.remove(obBoxes, i)
+                array.remove(obDirections, i)
+                array.remove(obTops, i)
+                array.remove(obBottoms, i)
+                array.remove(obMitigated, i)
+                array.remove(obCreatedBars, i)
+            else
+                bool priceEnteredZone = high >= zoneBottom and low <= zoneTop
+
+                if not alreadyMitigated and priceEnteredZone
+                    array.set(obMitigated, i, true)
+
+                    if isBullishOb
+                        bullishObMitigatedEvent := true
+                    else
+                        bearishObMitigatedEvent := true
+
+                    if keepMitigatedOrderBlocks
+                        if not na(activeBox)
+                            color mutedColor = isBullishOb ? bullishColor : bearishColor
+                            box.set_bgcolor(activeBox, color.new(mutedColor, 93))
+                            box.set_border_color(activeBox, color.new(mutedColor, 55))
+                    else
+                        if not na(activeBox)
+                            box.delete(activeBox)
+                        array.remove(obBoxes, i)
+                        array.remove(obDirections, i)
+                        array.remove(obTops, i)
+                        array.remove(obBottoms, i)
+                        array.remove(obMitigated, i)
+                        array.remove(obCreatedBars, i)
+
+
+//====================================================================
 // CORE BIAS ENGINE
 //====================================================================
 //
 // Intentionally unchanged from v0.1 scoring so Phase 1 bias behavior
-// remains stable. BOS / CHoCH feed Last Event and alerts only in v0.2.
+// remains stable. Later confidence phases may incorporate OB state.
 //====================================================================
 
 int bullishPoints = 0
@@ -675,12 +933,17 @@ float alignmentScore =
 
 
 //====================================================================
-// LAST EVENT COLOR
+// LAST EVENT / OB COLORS
 //====================================================================
 
 color lastEventColor =
      str.contains(lastEvent, "Bullish") ? bullishColor :
      str.contains(lastEvent, "Bearish") ? bearishColor :
+     neutralColor
+
+color lastObColor =
+     str.contains(lastObEvent, "Bullish") ? bullishColor :
+     str.contains(lastObEvent, "Bearish") ? bearishColor :
      neutralColor
 
 
@@ -691,7 +954,7 @@ color lastEventColor =
 var table dashboard = table.new(
      position.top_right,
      2,
-     8,
+     9,
      bgcolor = color.new(color.black, 15),
      frame_color = color.new(color.white, 70),
      frame_width = 1,
@@ -721,7 +984,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v0.2",
+             "v0.3",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small
@@ -788,14 +1051,14 @@ if barstate.islast
         )
 
         //------------------------------------------------------------
-        // LAST HIGH
+        // LAST OB
         //------------------------------------------------------------
 
         table.cell(
              dashboard,
              0,
              4,
-             "Last High",
+             "Last OB",
              text_color = color.silver
         )
 
@@ -803,6 +1066,26 @@ if barstate.islast
              dashboard,
              1,
              4,
+             lastObEvent,
+             text_color = lastObColor
+        )
+
+        //------------------------------------------------------------
+        // LAST HIGH
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             5,
+             "Last High",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             5,
              lastHighType,
              text_color =
                  lastHighType == "HH"
@@ -819,7 +1102,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             5,
+             6,
              "Last Low",
              text_color = color.silver
         )
@@ -827,7 +1110,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             5,
+             6,
              lastLowType,
              text_color =
                  lastLowType == "HL"
@@ -844,7 +1127,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             6,
+             7,
              "Alignment",
              text_color = color.silver
         )
@@ -852,7 +1135,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             6,
+             7,
              str.tostring(
                  alignmentScore,
                  "#"
@@ -867,7 +1150,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             7,
+             8,
              "Bias",
              text_color = color.silver
         )
@@ -875,7 +1158,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             7,
+             8,
              marketBias,
              text_color = marketBiasColor,
              bgcolor = color.new(
@@ -891,7 +1174,7 @@ if barstate.islast
              0,
              0,
              1,
-             7
+             8
         )
 
 
@@ -899,8 +1182,8 @@ if barstate.islast
 // ALERTS
 //====================================================================
 //
-// One-bar pulses only. Events fire on confirmed closes, so alert
-// conditions inherit the non-repainting break policy.
+// One-bar pulses only. Structure and OB events inherit the
+// confirmed-close non-repainting policy from earlier engines.
 //====================================================================
 
 alertcondition(
@@ -925,4 +1208,40 @@ alertcondition(
      bearishChochEvent,
      title = "Bearish CHoCH",
      message = "AlphaFX AI: Bearish Change of Character"
+)
+
+alertcondition(
+     bullishObCreatedEvent,
+     title = "Bullish Order Block",
+     message = "AlphaFX AI: Bullish Order Block created"
+)
+
+alertcondition(
+     bearishObCreatedEvent,
+     title = "Bearish Order Block",
+     message = "AlphaFX AI: Bearish Order Block created"
+)
+
+alertcondition(
+     bullishObMitigatedEvent,
+     title = "Bullish OB Mitigated",
+     message = "AlphaFX AI: Bullish Order Block mitigated"
+)
+
+alertcondition(
+     bearishObMitigatedEvent,
+     title = "Bearish OB Mitigated",
+     message = "AlphaFX AI: Bearish Order Block mitigated"
+)
+
+alertcondition(
+     bullishObInvalidatedEvent,
+     title = "Bullish OB Invalidated",
+     message = "AlphaFX AI: Bullish Order Block invalidated"
+)
+
+alertcondition(
+     bearishObInvalidatedEvent,
+     title = "Bearish OB Invalidated",
+     message = "AlphaFX AI: Bearish Order Block invalidated"
 )
