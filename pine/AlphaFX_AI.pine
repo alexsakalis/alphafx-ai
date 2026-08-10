@@ -1,14 +1,15 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v0.1.0-alpha]",
+    "AlphaFX AI [v0.2.0-alpha]",
     shorttitle = "AlphaFX AI",
     overlay = true,
-    max_labels_count = 500
+    max_labels_count = 500,
+    max_lines_count = 100
 )
 
 //====================================================================
 // ALPHAFX AI
-// Version: 0.1.0-alpha
+// Version: 0.2.0-alpha
 //
 // Phase 1:
 // - EMA Trend Engine
@@ -17,10 +18,18 @@ indicator(
 // - Market Bias
 // - Dashboard
 //
+// Phase 2:
+// - BOS Engine
+// - CHoCH Engine
+// - Structure Break Lines
+// - Structure Break Alerts
+// - Last Event Dashboard Row
+//
 // Design:
 // - Confirmed structure only
 // - No future-looking data
-// - Foundation for BOS / CHoCH / SMC modules
+// - Breaks require closed-bar confirmation
+// - Foundation for OB / FVG / Liquidity modules
 //====================================================================
 
 
@@ -30,6 +39,7 @@ indicator(
 
 string GROUP_TREND     = "Trend Engine"
 string GROUP_STRUCTURE = "Market Structure"
+string GROUP_BOS       = "BOS / CHoCH"
 string GROUP_VISUALS   = "Visuals"
 string GROUP_DASHBOARD = "Dashboard"
 
@@ -90,6 +100,24 @@ bool showStructureLabels = input.bool(
      true,
      "Show HH / HL / LH / LL",
      group = GROUP_STRUCTURE
+)
+
+
+//====================================================================
+// BOS / CHOCH INPUTS
+//====================================================================
+
+bool showStructureLines = input.bool(
+     true,
+     "Show Structure Lines",
+     tooltip = "Dashed horizontal levels at the active confirmed swing high and low.",
+     group = GROUP_BOS
+)
+
+bool showBosChochLabels = input.bool(
+     true,
+     "Show BOS / CHoCH Labels",
+     group = GROUP_BOS
 )
 
 
@@ -260,7 +288,11 @@ bool newPivotLow  = not na(pivotLow)
 
 
 //====================================================================
-// PREVIOUS CONFIRMED SWING STORAGE
+// SWING STATE STORAGE
+//====================================================================
+//
+// Active swings drive BOS / CHoCH detection.
+// Each confirmed swing may generate only one structure-break event.
 //====================================================================
 
 var float previousSwingHigh = na
@@ -269,10 +301,28 @@ var float previousSwingLow  = na
 var float currentSwingHigh = na
 var float currentSwingLow  = na
 
+var float activeSwingHigh = na
+var float activeSwingLow  = na
+
+var int activeSwingHighBar = na
+var int activeSwingLowBar  = na
+
+var bool swingHighConsumed = true
+var bool swingLowConsumed  = true
+
+//  1 = Bullish structure
+//  0 = Unset / bootstrap
+// -1 = Bearish structure
+var int structuralDirection = 0
+
 var string lastHighType = "—"
 var string lastLowType  = "—"
 
 var string lastStructureEvent = "Waiting"
+var string lastEvent = "—"
+
+var line activeSwingHighLine = na
+var line activeSwingLowLine  = na
 
 
 //====================================================================
@@ -283,6 +333,8 @@ if newPivotHigh
 
     currentSwingHigh := pivotHigh
 
+    int pivotHighBar = bar_index - pivotLength
+
     string highType =
          na(previousSwingHigh) ? "H" :
          currentSwingHigh > previousSwingHigh ? "HH" :
@@ -292,10 +344,32 @@ if newPivotHigh
     lastHighType := highType
     lastStructureEvent := highType
 
+    // Activate this swing for a single future BOS / CHoCH.
+    activeSwingHigh := pivotHigh
+    activeSwingHighBar := pivotHighBar
+    swingHighConsumed := false
+
+    if showStructureLines
+        if not na(activeSwingHighLine)
+            line.set_extend(activeSwingHighLine, extend.none)
+            line.set_x2(activeSwingHighLine, bar_index)
+
+        activeSwingHighLine := line.new(
+             pivotHighBar,
+             pivotHigh,
+             bar_index,
+             pivotHigh,
+             xloc = xloc.bar_index,
+             extend = extend.right,
+             style = line.style_dashed,
+             color = color.new(bullishColor, 30),
+             width = 1
+        )
+
     if showStructureLabels
 
         label.new(
-             bar_index - pivotLength,
+             pivotHighBar,
              pivotHigh,
              highType,
              style = label.style_label_down,
@@ -320,6 +394,8 @@ if newPivotLow
 
     currentSwingLow := pivotLow
 
+    int pivotLowBar = bar_index - pivotLength
+
     string lowType =
          na(previousSwingLow) ? "L" :
          currentSwingLow > previousSwingLow ? "HL" :
@@ -329,10 +405,32 @@ if newPivotLow
     lastLowType := lowType
     lastStructureEvent := lowType
 
+    // Activate this swing for a single future BOS / CHoCH.
+    activeSwingLow := pivotLow
+    activeSwingLowBar := pivotLowBar
+    swingLowConsumed := false
+
+    if showStructureLines
+        if not na(activeSwingLowLine)
+            line.set_extend(activeSwingLowLine, extend.none)
+            line.set_x2(activeSwingLowLine, bar_index)
+
+        activeSwingLowLine := line.new(
+             pivotLowBar,
+             pivotLow,
+             bar_index,
+             pivotLow,
+             xloc = xloc.bar_index,
+             extend = extend.right,
+             style = line.style_dashed,
+             color = color.new(bearishColor, 30),
+             width = 1
+        )
+
     if showStructureLabels
 
         label.new(
-             bar_index - pivotLength,
+             pivotLowBar,
              pivotLow,
              lowType,
              style = label.style_label_up,
@@ -360,6 +458,9 @@ if newPivotLow
 // LH + LL
 //
 // Anything else is treated as Mixed.
+//
+// Note: structuralDirection (BOS / CHoCH) is tracked separately and
+// does not redefine this Phase 1 HH / HL bias.
 //====================================================================
 
 bool bullishStructure =
@@ -382,18 +483,135 @@ color structureColor =
 
 
 //====================================================================
+// STRUCTURE BREAK DETECTION
+//====================================================================
+//
+// A break requires a confirmed bar close beyond an active, unconsumed
+// swing. Intrabar wicks never generate events.
+//====================================================================
+
+bool bullishBreak =
+     barstate.isconfirmed and
+     not swingHighConsumed and
+     not na(activeSwingHigh) and
+     close > activeSwingHigh
+
+bool bearishBreak =
+     barstate.isconfirmed and
+     not swingLowConsumed and
+     not na(activeSwingLow) and
+     close < activeSwingLow
+
+
+//====================================================================
+// BOS ENGINE + CHOCH ENGINE
+//====================================================================
+//
+// Shared break detection above; classification below.
+//
+// Classification:
+// - Bullish break + direction bullish or unset  -> Bullish BOS
+// - Bullish break + direction bearish           -> Bullish CHoCH
+// - Bearish break + direction bearish or unset  -> Bearish BOS
+// - Bearish break + direction bullish           -> Bearish CHoCH
+//
+// Same-bar dual break order:
+// 1) Prefer any CHoCH (structure flip) first
+// 2) Otherwise process bullish break, then bearish break
+//====================================================================
+
+bool bullishBosEvent   = false
+bool bearishBosEvent   = false
+bool bullishChochEvent = false
+bool bearishChochEvent = false
+
+// Resolve same-bar priority into an ordered pair of actions.
+bool runBullishBreak = false
+bool runBearishBreak = false
+
+if bullishBreak and bearishBreak
+    bool bullishIsChoch = structuralDirection == -1
+    bool bearishIsChoch = structuralDirection == 1
+
+    if bullishIsChoch and not bearishIsChoch
+        runBullishBreak := true
+    else if bearishIsChoch and not bullishIsChoch
+        runBearishBreak := true
+    else
+        runBullishBreak := true
+        runBearishBreak := true
+else if bullishBreak
+    runBullishBreak := true
+else if bearishBreak
+    runBearishBreak := true
+
+if runBullishBreak
+    bool isBullishChoch = structuralDirection == -1
+    string bullishEventName = isBullishChoch ? "Bullish CHoCH" : "Bullish BOS"
+
+    swingHighConsumed := true
+    structuralDirection := 1
+    lastEvent := bullishEventName
+    lastStructureEvent := bullishEventName
+
+    if isBullishChoch
+        bullishChochEvent := true
+    else
+        bullishBosEvent := true
+
+    if showStructureLines and not na(activeSwingHighLine)
+        line.set_extend(activeSwingHighLine, extend.none)
+        line.set_x2(activeSwingHighLine, bar_index)
+
+    if showBosChochLabels
+        label.new(
+             bar_index,
+             high,
+             bullishEventName,
+             style = label.style_label_up,
+             color = bullishColor,
+             textcolor = color.white,
+             size = size.tiny
+        )
+
+// Re-check swingLowConsumed so a same-bar bullish event cannot
+// double-fire a low that was somehow already consumed.
+if runBearishBreak and not swingLowConsumed
+    bool isBearishChoch = structuralDirection == 1
+    string bearishEventName = isBearishChoch ? "Bearish CHoCH" : "Bearish BOS"
+
+    swingLowConsumed := true
+    structuralDirection := -1
+    lastEvent := bearishEventName
+    lastStructureEvent := bearishEventName
+
+    if isBearishChoch
+        bearishChochEvent := true
+    else
+        bearishBosEvent := true
+
+    if showStructureLines and not na(activeSwingLowLine)
+        line.set_extend(activeSwingLowLine, extend.none)
+        line.set_x2(activeSwingLowLine, bar_index)
+
+    if showBosChochLabels
+        label.new(
+             bar_index,
+             low,
+             bearishEventName,
+             style = label.style_label_down,
+             color = bearishColor,
+             textcolor = color.white,
+             size = size.tiny
+        )
+
+
+//====================================================================
 // CORE BIAS ENGINE
 //====================================================================
 //
-// This is intentionally simple for v0.1.
-//
-// Later phases will add:
-// - BOS
-// - CHoCH
-// - Liquidity
-// - FVG
-// - Order Blocks
-// - Higher timeframe confirmation
+// Intentionally unchanged from v0.1 scoring so Phase 1 bias behavior
+// remains stable. BOS / CHoCH feed Last Event and alerts only in v0.2.
 //====================================================================
 
 int bullishPoints = 0
@@ -457,13 +675,23 @@ float alignmentScore =
 
 
 //====================================================================
+// LAST EVENT COLOR
+//====================================================================
+
+color lastEventColor =
+     str.contains(lastEvent, "Bullish") ? bullishColor :
+     str.contains(lastEvent, "Bearish") ? bearishColor :
+     neutralColor
+
+
+//====================================================================
 // DASHBOARD
 //====================================================================
 
 var table dashboard = table.new(
      position.top_right,
      2,
-     7,
+     8,
      bgcolor = color.new(color.black, 15),
      frame_color = color.new(color.white, 70),
      frame_width = 1,
@@ -493,7 +721,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v0.1",
+             "v0.2",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small
@@ -540,14 +768,14 @@ if barstate.islast
         )
 
         //------------------------------------------------------------
-        // LAST HIGH
+        // LAST EVENT
         //------------------------------------------------------------
 
         table.cell(
              dashboard,
              0,
              3,
-             "Last High",
+             "Last Event",
              text_color = color.silver
         )
 
@@ -555,6 +783,26 @@ if barstate.islast
              dashboard,
              1,
              3,
+             lastEvent,
+             text_color = lastEventColor
+        )
+
+        //------------------------------------------------------------
+        // LAST HIGH
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             4,
+             "Last High",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             4,
              lastHighType,
              text_color =
                  lastHighType == "HH"
@@ -571,7 +819,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             4,
+             5,
              "Last Low",
              text_color = color.silver
         )
@@ -579,7 +827,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             4,
+             5,
              lastLowType,
              text_color =
                  lastLowType == "HL"
@@ -596,7 +844,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             5,
+             6,
              "Alignment",
              text_color = color.silver
         )
@@ -604,7 +852,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             5,
+             6,
              str.tostring(
                  alignmentScore,
                  "#"
@@ -619,7 +867,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             6,
+             7,
              "Bias",
              text_color = color.silver
         )
@@ -627,7 +875,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             6,
+             7,
              marketBias,
              text_color = marketBiasColor,
              bgcolor = color.new(
@@ -643,5 +891,38 @@ if barstate.islast
              0,
              0,
              1,
-             6
+             7
         )
+
+
+//====================================================================
+// ALERTS
+//====================================================================
+//
+// One-bar pulses only. Events fire on confirmed closes, so alert
+// conditions inherit the non-repainting break policy.
+//====================================================================
+
+alertcondition(
+     bullishBosEvent,
+     title = "Bullish BOS",
+     message = "AlphaFX AI: Bullish Break of Structure"
+)
+
+alertcondition(
+     bearishBosEvent,
+     title = "Bearish BOS",
+     message = "AlphaFX AI: Bearish Break of Structure"
+)
+
+alertcondition(
+     bullishChochEvent,
+     title = "Bullish CHoCH",
+     message = "AlphaFX AI: Bullish Change of Character"
+)
+
+alertcondition(
+     bearishChochEvent,
+     title = "Bearish CHoCH",
+     message = "AlphaFX AI: Bearish Change of Character"
+)
