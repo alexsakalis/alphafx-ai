@@ -12,9 +12,11 @@ Inputs
   → BOS Engine
   → CHoCH Engine
   → Order Block Engine
+  → Breaker Block Engine
   → Fair Value Gap Engine
   → Liquidity Engine
-  → Session Engine
+  → Session Engine (+ Killzone Arming)
+  → Premium / Discount Engine
   → Multi-Timeframe Engine
   → Confidence Engine
   → Risk Engine
@@ -41,9 +43,11 @@ Later engines consume state from earlier engines. Dependencies are never skipped
 | Swing highs/lows + labels | Swing / Structure |
 | `structuralDirection`, `lastEvent` | BOS / CHoCH |
 | OB arrays | Order Block Engine |
+| Breaker arrays | Breaker Block Engine |
 | FVG arrays | Fair Value Gap Engine |
 | EQH/EQL pools | Liquidity Engine |
-| Session ranges | Session Engine |
+| Session ranges / killzone armed | Session Engine |
+| `pdZoneText` / equilibrium | Premium / Discount Engine |
 | `htfTrendState`, MTF align | Multi-Timeframe Engine |
 | `confidenceScore` / direction | Confidence Engine |
 | SL / TP / size model | Risk Engine |

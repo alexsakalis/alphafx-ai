@@ -2,7 +2,7 @@
 
 Professional Smart Money Concepts indicator for TradingView, written in Pine Script v6.
 
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Professional Release
 
 ## What it is
@@ -33,6 +33,9 @@ It combines trend, market structure, BOS/CHoCH, order blocks, fair value gaps, l
 | Multi-Timeframe | Confirmed HTF trend alignment |
 | Confidence | Confluence score and grade |
 | Risk | Structure-based SL / TP / size model |
+| Premium / Discount | Equilibrium from active swing range |
+| Killzone Arming | London / NY open windows for quality gating |
+| Breaker Blocks | Failed OBs flipped into opposite zones |
 
 ## Profiles
 

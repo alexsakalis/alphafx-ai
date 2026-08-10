@@ -17,14 +17,14 @@
 
 ## Current
 
-**1.1.0** — professional release + profile presets (Scalp / Intraday / Swing / Custom).
+**1.2.0** — quality layer: Premium/Discount, Killzone arming, Breaker blocks.
 
-## Post-1.1 ideas
+## Post-1.2 ideas
 
 1. Chart screenshots in `assets/screenshots/`
-2. Optional engine extraction into `pine/modules/`
-3. Additional killzone / news filters
-4. Performance profiling on dense drawings
+2. HTF structure (BOS/CHoCH) into Confidence
+3. OB/FVG confluence tags + CE midpoints
+4. Optional engine extraction into `pine/modules/`
 5. Public TradingView publication package
 
 ## Non-goals

@@ -1,15 +1,15 @@
-# Release — 1.1.0
+# Release — 1.2.0
 
 ## Status
 
-**Released:** AlphaFX AI `1.1.0` (profiles on top of the 1.0.0 professional base).
+**Released:** AlphaFX AI `1.2.0` quality upgrade.
 
 ## Included
 
 - [x] Engines through Risk (Phases 1–9)
-- [x] Professional docs and MIT LICENSE
-- [x] Version `1.1.0` in `VERSION`, Pine header, and dashboard (`v1.1`)
 - [x] Profile presets (Custom / Scalp / Intraday / Swing)
+- [x] Premium / Discount + Killzone arming + Breaker blocks
+- [x] Version `1.2.0` in `VERSION`, Pine header, and dashboard (`v1.2`)
 - [x] Validation templates under `tests/`
 
 ## Ongoing validation
@@ -27,11 +27,11 @@ Re-run as settings or markets change:
 ## Suggested git tag
 
 ```text
-v1.1.0
+v1.2.0
 ```
 
 ## Suggested commit message
 
 ```text
-feat: add scalp intraday and swing profile presets
+feat: add premium discount killzone arming and breaker blocks
 ```

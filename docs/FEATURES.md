@@ -1,5 +1,24 @@
 # Features
 
+## Premium / Discount
+
+- Equilibrium = midpoint of active confirmed swing high / low
+- Premium / Discount / Equilibrium band classification
+- Optional equilibrium line and background shade
+- Optional risk gate: longs only in discount, shorts only in premium
+
+## Killzone Arming
+
+- Configurable London Open and New York Open windows
+- Arms confidence quality bonus only while killzone is active
+- Optional requirement for Risk model readiness
+
+## Breaker Blocks
+
+- Created when an order block is invalidated by confirmed close-through
+- Direction flips (failed bullish OB → bearish breaker)
+- Mitigation / fill lifecycle with alerts
+
 ## Profile Presets
 
 - **Scalp** — tighter pivots, more reactive zones, HTF `15`

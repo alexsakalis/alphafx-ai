@@ -2,6 +2,23 @@
 
 All notable changes to AlphaFX AI are documented in this file.
 
+## 1.2.0
+
+### Added
+
+- Premium / Discount engine from active confirmed swing range
+- Equilibrium line + optional premium/discount shading
+- Killzone arming (London Open / NY Open windows)
+- Optional killzone + PD alignment gates for the Risk model
+- Breaker Block engine (failed OBs flip into opposite breakers)
+- Dashboard rows: Zone, Killzone, Last BR
+- Breaker and killzone-armed alerts
+
+### Changed
+
+- Confidence bonuses now use killzone arming, PD alignment, and active breakers
+- Confidence raw score clamped to 100 before MTF conflict penalty
+
 ## 1.1.0
 
 ### Added
