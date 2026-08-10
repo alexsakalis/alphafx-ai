@@ -1,6 +1,6 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v0.7.0-alpha]",
+    "AlphaFX AI [v0.8.0-alpha]",
     shorttitle = "AlphaFX AI",
     overlay = true,
     max_labels_count = 500,
@@ -10,7 +10,7 @@ indicator(
 
 //====================================================================
 // ALPHAFX AI
-// Version: 0.7.0-alpha
+// Version: 0.8.0-alpha
 //
 // Phase 1:
 // - EMA Trend Engine
@@ -50,6 +50,10 @@ indicator(
 // - Multi-Timeframe Engine
 // - Confirmed HTF Trend Alignment
 //
+// Phase 8:
+// - Confidence Engine
+// - Confluence Scoring + Grades
+//
 // Design:
 // - Confirmed structure only
 // - No future-looking data
@@ -59,7 +63,8 @@ indicator(
 // - Liquidity uses confirmed swing equals only
 // - Session highs / lows lock when the session ends
 // - HTF data uses completed higher-timeframe bars only
-// - Foundation for Confidence / Risk modules
+// - Confidence measures confluence, not win probability
+// - Foundation for Risk module
 //====================================================================
 
 
@@ -67,16 +72,17 @@ indicator(
 // INPUT GROUPS
 //====================================================================
 
-string GROUP_TREND     = "Trend Engine"
-string GROUP_STRUCTURE = "Market Structure"
-string GROUP_BOS       = "BOS / CHoCH"
-string GROUP_OB        = "Order Blocks"
-string GROUP_FVG       = "Fair Value Gaps"
-string GROUP_LIQUIDITY = "Liquidity"
-string GROUP_SESSIONS  = "Sessions"
-string GROUP_MTF       = "Multi-Timeframe"
-string GROUP_VISUALS   = "Visuals"
-string GROUP_DASHBOARD = "Dashboard"
+string GROUP_TREND      = "Trend Engine"
+string GROUP_STRUCTURE  = "Market Structure"
+string GROUP_BOS        = "BOS / CHoCH"
+string GROUP_OB         = "Order Blocks"
+string GROUP_FVG        = "Fair Value Gaps"
+string GROUP_LIQUIDITY  = "Liquidity"
+string GROUP_SESSIONS   = "Sessions"
+string GROUP_MTF        = "Multi-Timeframe"
+string GROUP_CONFIDENCE = "Confidence"
+string GROUP_VISUALS    = "Visuals"
+string GROUP_DASHBOARD  = "Dashboard"
 
 
 //====================================================================
@@ -375,6 +381,36 @@ string mtfTimeframe = input.timeframe(
      "Higher Timeframe",
      tooltip = "Confirmed HTF trend is compared against the chart timeframe trend and structure.",
      group = GROUP_MTF
+)
+
+
+//====================================================================
+// CONFIDENCE INPUTS
+//====================================================================
+
+bool enableConfidence = input.bool(
+     true,
+     "Enable Confidence Engine",
+     tooltip = "Scores confluence across trend, structure, MTF, OB, FVG, liquidity, and sessions. Not a win-rate forecast.",
+     group = GROUP_CONFIDENCE
+)
+
+int confidenceAlertThreshold = input.int(
+     70,
+     "High Confidence Alert Threshold",
+     minval = 1,
+     maxval = 100,
+     tooltip = "Alerts fire when confidence crosses this level with a clear bullish or bearish direction.",
+     group = GROUP_CONFIDENCE
+)
+
+int mtfConflictPenalty = input.int(
+     15,
+     "MTF Conflict Penalty",
+     minval = 0,
+     maxval = 40,
+     tooltip = "Points subtracted from confidence when chart and HTF trends conflict.",
+     group = GROUP_CONFIDENCE
 )
 
 
@@ -2097,8 +2133,8 @@ previousMtfAlignState := currentMtfAlignState
 // CORE BIAS ENGINE
 //====================================================================
 //
-// Chart bias remains Phase 1 scoring. MTF alignment is reported
-// separately and will feed the Confidence Engine in a later phase.
+// Chart bias remains Phase 1 scoring for stability.
+// Confidence Engine below aggregates broader confluence.
 //====================================================================
 
 int bullishPoints = 0
@@ -2162,6 +2198,181 @@ float alignmentScore =
 
 
 //====================================================================
+// CONFIDENCE ENGINE
+//====================================================================
+//
+// Confluence score across confirmed engines.
+//
+// Weight map (per side, max 100 before conflict penalty):
+// - Chart EMA trend                 18
+// - Structural direction (BOS/CHoCH) 14
+// - HH/HL or LH/LL structure pair   10
+// - MTF trend alignment             18
+// - Latest matching structure event 10
+// - Active matching Order Block     10
+// - Active matching FVG              8
+// - Matching liquidity sweep         7
+// - London / New York session        5
+//
+// NOT a win probability. It only measures agreement quality.
+// Uses already-confirmed engine state only.
+//====================================================================
+
+bool hasActiveBullishOb = false
+bool hasActiveBearishOb = false
+
+if array.size(obDirections) > 0
+    for i = 0 to array.size(obDirections) - 1
+        int obDir = array.get(obDirections, i)
+        if obDir == 1
+            hasActiveBullishOb := true
+        if obDir == -1
+            hasActiveBearishOb := true
+
+bool hasActiveBullishFvg = false
+bool hasActiveBearishFvg = false
+
+if array.size(fvgDirections) > 0
+    for i = 0 to array.size(fvgDirections) - 1
+        int fvgDir = array.get(fvgDirections, i)
+        if fvgDir == 1
+            hasActiveBullishFvg := true
+        if fvgDir == -1
+            hasActiveBearishFvg := true
+
+bool bullishStructureEvent =
+     lastEvent == "Bullish BOS" or
+     lastEvent == "Bullish CHoCH"
+
+bool bearishStructureEvent =
+     lastEvent == "Bearish BOS" or
+     lastEvent == "Bearish CHoCH"
+
+bool bullishLiquiditySweep = lastLiquidityEvent == "EQL Sweep"
+bool bearishLiquiditySweep = lastLiquidityEvent == "EQH Sweep"
+
+bool inKillzoneSession = inLondonSession or inNewYorkSession
+
+int bullishConfidencePoints = 0
+int bearishConfidencePoints = 0
+
+if enableConfidence
+    if trendState == 1
+        bullishConfidencePoints += 18
+    if trendState == -1
+        bearishConfidencePoints += 18
+
+    if structuralDirection == 1
+        bullishConfidencePoints += 14
+    if structuralDirection == -1
+        bearishConfidencePoints += 14
+
+    if bullishStructure
+        bullishConfidencePoints += 10
+    if bearishStructure
+        bearishConfidencePoints += 10
+
+    if mtfTrendBullishAligned
+        bullishConfidencePoints += 18
+    if mtfTrendBearishAligned
+        bearishConfidencePoints += 18
+
+    if bullishStructureEvent
+        bullishConfidencePoints += 10
+    if bearishStructureEvent
+        bearishConfidencePoints += 10
+
+    if hasActiveBullishOb
+        bullishConfidencePoints += 10
+    if hasActiveBearishOb
+        bearishConfidencePoints += 10
+
+    if hasActiveBullishFvg
+        bullishConfidencePoints += 8
+    if hasActiveBearishFvg
+        bearishConfidencePoints += 8
+
+    if bullishLiquiditySweep
+        bullishConfidencePoints += 7
+    if bearishLiquiditySweep
+        bearishConfidencePoints += 7
+
+    if inKillzoneSession
+        if trendState == 1
+            bullishConfidencePoints += 5
+        else if trendState == -1
+            bearishConfidencePoints += 5
+        else if structuralDirection == 1
+            bullishConfidencePoints += 5
+        else if structuralDirection == -1
+            bearishConfidencePoints += 5
+
+int confidenceDirection =
+     not enableConfidence ? 0 :
+     bullishConfidencePoints > bearishConfidencePoints ? 1 :
+     bearishConfidencePoints > bullishConfidencePoints ? -1 :
+     0
+
+float confidenceScoreRaw =
+     not enableConfidence ? 0.0 :
+     confidenceDirection == 1 ? bullishConfidencePoints :
+     confidenceDirection == -1 ? bearishConfidencePoints :
+     math.max(bullishConfidencePoints, bearishConfidencePoints)
+
+float confidenceScore =
+     mtfTrendConflict
+         ? math.max(0.0, confidenceScoreRaw - mtfConflictPenalty)
+         : confidenceScoreRaw
+
+string confidenceGrade =
+     not enableConfidence ? "OFF" :
+     confidenceScore >= 80 ? "VERY HIGH" :
+     confidenceScore >= 60 ? "HIGH" :
+     confidenceScore >= 40 ? "MEDIUM" :
+     "LOW"
+
+string confidenceDirectionText =
+     not enableConfidence ? "OFF" :
+     confidenceDirection == 1 ? "BULLISH" :
+     confidenceDirection == -1 ? "BEARISH" :
+     "NEUTRAL"
+
+string confidenceText =
+     not enableConfidence
+         ? "OFF"
+         : str.tostring(confidenceScore, "#") + "% " + confidenceGrade
+
+color confidenceColor =
+     not enableConfidence ? neutralColor :
+     confidenceDirection == 1 ? bullishColor :
+     confidenceDirection == -1 ? bearishColor :
+     neutralColor
+
+bool highConfidenceBullishEvent = false
+bool highConfidenceBearishEvent = false
+
+var float previousConfidenceScore = 0.0
+var int previousConfidenceDirection = 0
+
+bool crossedHighConfidence =
+     enableConfidence and
+     confidenceScore >= confidenceAlertThreshold and
+     (
+         previousConfidenceScore < confidenceAlertThreshold or
+         previousConfidenceDirection != confidenceDirection
+     )
+
+if crossedHighConfidence and confidenceDirection == 1
+    highConfidenceBullishEvent := true
+
+if crossedHighConfidence and confidenceDirection == -1
+    highConfidenceBearishEvent := true
+
+previousConfidenceScore := confidenceScore
+previousConfidenceDirection := confidenceDirection
+
+
+//====================================================================
 // LAST EVENT / OB / FVG / LIQUIDITY / SESSION COLORS
 //====================================================================
 
@@ -2201,7 +2412,7 @@ color lastSessionEventColor =
 var table dashboard = table.new(
      position.top_right,
      2,
-     15,
+     16,
      bgcolor = color.new(color.black, 15),
      frame_color = color.new(color.white, 70),
      frame_width = 1,
@@ -2231,7 +2442,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v0.7",
+             "v0.8",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small
@@ -2511,14 +2722,14 @@ if barstate.islast
         )
 
         //------------------------------------------------------------
-        // BIAS
+        // CONFIDENCE
         //------------------------------------------------------------
 
         table.cell(
              dashboard,
              0,
              14,
-             "Bias",
+             "Confidence",
              text_color = color.silver
         )
 
@@ -2526,6 +2737,29 @@ if barstate.islast
              dashboard,
              1,
              14,
+             enableConfidence
+                 ? confidenceText + " " + confidenceDirectionText
+                 : "OFF",
+             text_color = confidenceColor,
+             bgcolor = color.new(confidenceColor, 88)
+        )
+
+        //------------------------------------------------------------
+        // BIAS
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             15,
+             "Bias",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             15,
              marketBias,
              text_color = marketBiasColor,
              bgcolor = color.new(
@@ -2541,7 +2775,7 @@ if barstate.islast
              0,
              0,
              1,
-             14
+             15
         )
 
 
@@ -2743,4 +2977,16 @@ alertcondition(
      mtfConflictEvent,
      title = "MTF Conflict",
      message = "AlphaFX AI: Chart and HTF trends are in conflict"
+)
+
+alertcondition(
+     highConfidenceBullishEvent,
+     title = "High Confidence Bullish",
+     message = "AlphaFX AI: Bullish confluence confidence crossed the alert threshold"
+)
+
+alertcondition(
+     highConfidenceBearishEvent,
+     title = "High Confidence Bearish",
+     message = "AlphaFX AI: Bearish confluence confidence crossed the alert threshold"
 )
