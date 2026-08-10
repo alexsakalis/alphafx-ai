@@ -1,16 +1,16 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v0.3.0-alpha]",
+    "AlphaFX AI [v0.4.0-alpha]",
     shorttitle = "AlphaFX AI",
     overlay = true,
     max_labels_count = 500,
     max_lines_count = 100,
-    max_boxes_count = 100
+    max_boxes_count = 200
 )
 
 //====================================================================
 // ALPHAFX AI
-// Version: 0.3.0-alpha
+// Version: 0.4.0-alpha
 //
 // Phase 1:
 // - EMA Trend Engine
@@ -31,12 +31,18 @@ indicator(
 // - Mitigation / Invalidation
 // - OB Dashboard + Alerts
 //
+// Phase 4:
+// - Fair Value Gap Engine
+// - FVG Mitigation / Fill
+// - FVG Dashboard + Alerts
+//
 // Design:
 // - Confirmed structure only
 // - No future-looking data
 // - Breaks require closed-bar confirmation
 // - OBs are derived only from confirmed BOS / CHoCH
-// - Foundation for FVG / Liquidity modules
+// - FVGs use confirmed 3-candle imbalances only
+// - Foundation for Liquidity / Sessions modules
 //====================================================================
 
 
@@ -48,6 +54,7 @@ string GROUP_TREND     = "Trend Engine"
 string GROUP_STRUCTURE = "Market Structure"
 string GROUP_BOS       = "BOS / CHoCH"
 string GROUP_OB        = "Order Blocks"
+string GROUP_FVG       = "Fair Value Gaps"
 string GROUP_VISUALS   = "Visuals"
 string GROUP_DASHBOARD = "Dashboard"
 
@@ -168,6 +175,48 @@ bool keepMitigatedOrderBlocks = input.bool(
      "Keep Mitigated Order Blocks",
      tooltip = "When enabled, mitigated OBs stay visible with reduced opacity until invalidated.",
      group = GROUP_OB
+)
+
+
+//====================================================================
+// FAIR VALUE GAP INPUTS
+//====================================================================
+
+bool showFairValueGaps = input.bool(
+     true,
+     "Show Fair Value Gaps",
+     group = GROUP_FVG
+)
+
+float fvgMinAtrMult = input.float(
+     0.0,
+     "Min FVG Size (ATR Mult)",
+     minval = 0.0,
+     step = 0.05,
+     tooltip = "Ignore gaps smaller than ATR(14) * this value. 0 = keep all gaps.",
+     group = GROUP_FVG
+)
+
+int maxFairValueGaps = input.int(
+     8,
+     "Max Active FVGs",
+     minval = 1,
+     maxval = 50,
+     group = GROUP_FVG
+)
+
+bool keepMitigatedFvg = input.bool(
+     true,
+     "Keep Mitigated FVGs",
+     tooltip = "When enabled, touched FVGs stay visible with reduced opacity until fully filled.",
+     group = GROUP_FVG
+)
+
+bool fvgRequireStructureAlign = input.bool(
+     false,
+     "Require Structure Alignment",
+     tooltip = "When enabled, bullish FVGs require bullish/unset structure direction and bearish FVGs require bearish/unset structure direction.",
+     group = GROUP_FVG
 )
 
 
@@ -865,11 +914,216 @@ if barstate.isconfirmed and array.size(obBoxes) > 0
 
 
 //====================================================================
+// FAIR VALUE GAP ENGINE
+//====================================================================
+//
+// Classic 3-candle imbalance on a confirmed bar:
+// - Bullish FVG: low > high[2]
+// - Bearish FVG: high < low[2]
+//
+// Zone:
+// - Bullish: [high[2], low]
+// - Bearish: [high, low[2]]
+//
+// Lifecycle:
+// - Mitigated when price revisits the gap after creation
+// - Filled / removed when price trades through the far side of the gap
+//
+// Non-repainting:
+// Detection requires barstate.isconfirmed so candle 3 is closed.
+//====================================================================
+
+var array<box>   fvgBoxes       = array.new_box()
+var array<int>   fvgDirections  = array.new_int()
+var array<float> fvgTops        = array.new_float()
+var array<float> fvgBottoms     = array.new_float()
+var array<bool>  fvgMitigated   = array.new_bool()
+var array<int>   fvgCreatedBars = array.new_int()
+
+var string lastFvgEvent = "—"
+
+bool bullishFvgCreatedEvent   = false
+bool bearishFvgCreatedEvent   = false
+bool bullishFvgMitigatedEvent = false
+bool bearishFvgMitigatedEvent = false
+bool bullishFvgFilledEvent    = false
+bool bearishFvgFilledEvent    = false
+
+float fvgAtr = ta.atr(14)
+
+bool bullishFvgSignal =
+     barstate.isconfirmed and
+     low > high[2]
+
+bool bearishFvgSignal =
+     barstate.isconfirmed and
+     high < low[2]
+
+if bullishFvgSignal
+    float bullishFvgTop = low
+    float bullishFvgBottom = high[2]
+    float bullishGapSize = bullishFvgTop - bullishFvgBottom
+
+    bool bullishSizeOk =
+         fvgMinAtrMult <= 0.0 or
+         bullishGapSize >= fvgAtr * fvgMinAtrMult
+
+    bool bullishAlignOk =
+         not fvgRequireStructureAlign or
+         structuralDirection >= 0
+
+    if bullishSizeOk and bullishAlignOk and bullishGapSize > 0
+        box bullishFvgBox = na
+        if showFairValueGaps
+            bullishFvgBox := box.new(
+                 bar_index - 2,
+                 bullishFvgTop,
+                 bar_index,
+                 bullishFvgBottom,
+                 xloc = xloc.bar_index,
+                 border_color = color.new(bullishColor, 35),
+                 border_width = 1,
+                 bgcolor = color.new(bullishColor, 88),
+                 extend = extend.none
+            )
+
+        array.push(fvgBoxes, bullishFvgBox)
+        array.push(fvgDirections, 1)
+        array.push(fvgTops, bullishFvgTop)
+        array.push(fvgBottoms, bullishFvgBottom)
+        array.push(fvgMitigated, false)
+        array.push(fvgCreatedBars, bar_index)
+
+        while array.size(fvgBoxes) > maxFairValueGaps
+            box oldFvgBox = array.get(fvgBoxes, 0)
+            if not na(oldFvgBox)
+                box.delete(oldFvgBox)
+            array.remove(fvgBoxes, 0)
+            array.remove(fvgDirections, 0)
+            array.remove(fvgTops, 0)
+            array.remove(fvgBottoms, 0)
+            array.remove(fvgMitigated, 0)
+            array.remove(fvgCreatedBars, 0)
+
+        lastFvgEvent := "Bullish FVG"
+        bullishFvgCreatedEvent := true
+
+if bearishFvgSignal
+    float bearishFvgTop = low[2]
+    float bearishFvgBottom = high
+    float bearishGapSize = bearishFvgTop - bearishFvgBottom
+
+    bool bearishSizeOk =
+         fvgMinAtrMult <= 0.0 or
+         bearishGapSize >= fvgAtr * fvgMinAtrMult
+
+    bool bearishAlignOk =
+         not fvgRequireStructureAlign or
+         structuralDirection <= 0
+
+    if bearishSizeOk and bearishAlignOk and bearishGapSize > 0
+        box bearishFvgBox = na
+        if showFairValueGaps
+            bearishFvgBox := box.new(
+                 bar_index - 2,
+                 bearishFvgTop,
+                 bar_index,
+                 bearishFvgBottom,
+                 xloc = xloc.bar_index,
+                 border_color = color.new(bearishColor, 35),
+                 border_width = 1,
+                 bgcolor = color.new(bearishColor, 88),
+                 extend = extend.none
+            )
+
+        array.push(fvgBoxes, bearishFvgBox)
+        array.push(fvgDirections, -1)
+        array.push(fvgTops, bearishFvgTop)
+        array.push(fvgBottoms, bearishFvgBottom)
+        array.push(fvgMitigated, false)
+        array.push(fvgCreatedBars, bar_index)
+
+        while array.size(fvgBoxes) > maxFairValueGaps
+            box oldFvgBox = array.get(fvgBoxes, 0)
+            if not na(oldFvgBox)
+                box.delete(oldFvgBox)
+            array.remove(fvgBoxes, 0)
+            array.remove(fvgDirections, 0)
+            array.remove(fvgTops, 0)
+            array.remove(fvgBottoms, 0)
+            array.remove(fvgMitigated, 0)
+            array.remove(fvgCreatedBars, 0)
+
+        lastFvgEvent := "Bearish FVG"
+        bearishFvgCreatedEvent := true
+
+// Extend, mitigate, and fill active FVGs on confirmed bars.
+if barstate.isconfirmed and array.size(fvgBoxes) > 0
+    for i = array.size(fvgBoxes) - 1 to 0
+        box activeFvgBox = array.get(fvgBoxes, i)
+        int fvgDirection = array.get(fvgDirections, i)
+        float fvgTop = array.get(fvgTops, i)
+        float fvgBottom = array.get(fvgBottoms, i)
+        bool fvgAlreadyMitigated = array.get(fvgMitigated, i)
+        int fvgCreatedBar = array.get(fvgCreatedBars, i)
+
+        if not na(activeFvgBox)
+            box.set_right(activeFvgBox, bar_index)
+
+        if bar_index > fvgCreatedBar
+            bool isBullishFvg = fvgDirection == 1
+
+            // Full fill: price trades through the far side of the imbalance.
+            bool fullyFilled =
+                 isBullishFvg ? low <= fvgBottom : high >= fvgTop
+
+            if fullyFilled
+                if isBullishFvg
+                    bullishFvgFilledEvent := true
+                else
+                    bearishFvgFilledEvent := true
+
+                if not na(activeFvgBox)
+                    box.delete(activeFvgBox)
+                array.remove(fvgBoxes, i)
+                array.remove(fvgDirections, i)
+                array.remove(fvgTops, i)
+                array.remove(fvgBottoms, i)
+                array.remove(fvgMitigated, i)
+                array.remove(fvgCreatedBars, i)
+            else
+                bool priceEnteredFvg = high >= fvgBottom and low <= fvgTop
+
+                if not fvgAlreadyMitigated and priceEnteredFvg
+                    array.set(fvgMitigated, i, true)
+
+                    if isBullishFvg
+                        bullishFvgMitigatedEvent := true
+                    else
+                        bearishFvgMitigatedEvent := true
+
+                    if keepMitigatedFvg
+                        if not na(activeFvgBox)
+                            color mutedFvgColor = isBullishFvg ? bullishColor : bearishColor
+                            box.set_bgcolor(activeFvgBox, color.new(mutedFvgColor, 94))
+                            box.set_border_color(activeFvgBox, color.new(mutedFvgColor, 60))
+                    else
+                        if not na(activeFvgBox)
+                            box.delete(activeFvgBox)
+                        array.remove(fvgBoxes, i)
+                        array.remove(fvgDirections, i)
+                        array.remove(fvgTops, i)
+                        array.remove(fvgBottoms, i)
+                        array.remove(fvgMitigated, i)
+                        array.remove(fvgCreatedBars, i)
+
+
+//====================================================================
 // CORE BIAS ENGINE
 //====================================================================
 //
 // Intentionally unchanged from v0.1 scoring so Phase 1 bias behavior
-// remains stable. Later confidence phases may incorporate OB state.
+// remains stable. Later confidence phases may incorporate OB / FVG state.
 //====================================================================
 
 int bullishPoints = 0
@@ -933,7 +1187,7 @@ float alignmentScore =
 
 
 //====================================================================
-// LAST EVENT / OB COLORS
+// LAST EVENT / OB / FVG COLORS
 //====================================================================
 
 color lastEventColor =
@@ -946,6 +1200,11 @@ color lastObColor =
      str.contains(lastObEvent, "Bearish") ? bearishColor :
      neutralColor
 
+color lastFvgColor =
+     str.contains(lastFvgEvent, "Bullish") ? bullishColor :
+     str.contains(lastFvgEvent, "Bearish") ? bearishColor :
+     neutralColor
+
 
 //====================================================================
 // DASHBOARD
@@ -954,7 +1213,7 @@ color lastObColor =
 var table dashboard = table.new(
      position.top_right,
      2,
-     9,
+     10,
      bgcolor = color.new(color.black, 15),
      frame_color = color.new(color.white, 70),
      frame_width = 1,
@@ -984,7 +1243,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v0.3",
+             "v0.4",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small
@@ -1071,14 +1330,14 @@ if barstate.islast
         )
 
         //------------------------------------------------------------
-        // LAST HIGH
+        // LAST FVG
         //------------------------------------------------------------
 
         table.cell(
              dashboard,
              0,
              5,
-             "Last High",
+             "Last FVG",
              text_color = color.silver
         )
 
@@ -1086,6 +1345,26 @@ if barstate.islast
              dashboard,
              1,
              5,
+             lastFvgEvent,
+             text_color = lastFvgColor
+        )
+
+        //------------------------------------------------------------
+        // LAST HIGH
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             6,
+             "Last High",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             6,
              lastHighType,
              text_color =
                  lastHighType == "HH"
@@ -1102,7 +1381,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             6,
+             7,
              "Last Low",
              text_color = color.silver
         )
@@ -1110,7 +1389,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             6,
+             7,
              lastLowType,
              text_color =
                  lastLowType == "HL"
@@ -1127,7 +1406,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             7,
+             8,
              "Alignment",
              text_color = color.silver
         )
@@ -1135,7 +1414,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             7,
+             8,
              str.tostring(
                  alignmentScore,
                  "#"
@@ -1150,7 +1429,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             8,
+             9,
              "Bias",
              text_color = color.silver
         )
@@ -1158,7 +1437,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             8,
+             9,
              marketBias,
              text_color = marketBiasColor,
              bgcolor = color.new(
@@ -1174,7 +1453,7 @@ if barstate.islast
              0,
              0,
              1,
-             8
+             9
         )
 
 
@@ -1182,7 +1461,7 @@ if barstate.islast
 // ALERTS
 //====================================================================
 //
-// One-bar pulses only. Structure and OB events inherit the
+// One-bar pulses only. Structure, OB, and FVG events inherit the
 // confirmed-close non-repainting policy from earlier engines.
 //====================================================================
 
@@ -1244,4 +1523,40 @@ alertcondition(
      bearishObInvalidatedEvent,
      title = "Bearish OB Invalidated",
      message = "AlphaFX AI: Bearish Order Block invalidated"
+)
+
+alertcondition(
+     bullishFvgCreatedEvent,
+     title = "Bullish FVG",
+     message = "AlphaFX AI: Bullish Fair Value Gap created"
+)
+
+alertcondition(
+     bearishFvgCreatedEvent,
+     title = "Bearish FVG",
+     message = "AlphaFX AI: Bearish Fair Value Gap created"
+)
+
+alertcondition(
+     bullishFvgMitigatedEvent,
+     title = "Bullish FVG Mitigated",
+     message = "AlphaFX AI: Bullish Fair Value Gap mitigated"
+)
+
+alertcondition(
+     bearishFvgMitigatedEvent,
+     title = "Bearish FVG Mitigated",
+     message = "AlphaFX AI: Bearish Fair Value Gap mitigated"
+)
+
+alertcondition(
+     bullishFvgFilledEvent,
+     title = "Bullish FVG Filled",
+     message = "AlphaFX AI: Bullish Fair Value Gap filled"
+)
+
+alertcondition(
+     bearishFvgFilledEvent,
+     title = "Bearish FVG Filled",
+     message = "AlphaFX AI: Bearish Fair Value Gap filled"
 )
