@@ -1,16 +1,16 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v0.5.0-alpha]",
+    "AlphaFX AI [v0.6.0-alpha]",
     shorttitle = "AlphaFX AI",
     overlay = true,
     max_labels_count = 500,
-    max_lines_count = 200,
-    max_boxes_count = 200
+    max_lines_count = 300,
+    max_boxes_count = 300
 )
 
 //====================================================================
 // ALPHAFX AI
-// Version: 0.5.0-alpha
+// Version: 0.6.0-alpha
 //
 // Phase 1:
 // - EMA Trend Engine
@@ -41,6 +41,11 @@ indicator(
 // - Liquidity Sweep Detection
 // - Liquidity Dashboard + Alerts
 //
+// Phase 6:
+// - Session Engine (Asian / London / New York)
+// - Confirmed Session Ranges
+// - Session High / Low Breaks
+//
 // Design:
 // - Confirmed structure only
 // - No future-looking data
@@ -48,7 +53,8 @@ indicator(
 // - OBs are derived only from confirmed BOS / CHoCH
 // - FVGs use confirmed 3-candle imbalances only
 // - Liquidity uses confirmed swing equals only
-// - Foundation for Sessions / MTF modules
+// - Session highs / lows lock when the session ends
+// - Foundation for MTF / Confidence modules
 //====================================================================
 
 
@@ -62,6 +68,7 @@ string GROUP_BOS       = "BOS / CHoCH"
 string GROUP_OB        = "Order Blocks"
 string GROUP_FVG       = "Fair Value Gaps"
 string GROUP_LIQUIDITY = "Liquidity"
+string GROUP_SESSIONS  = "Sessions"
 string GROUP_VISUALS   = "Visuals"
 string GROUP_DASHBOARD = "Dashboard"
 
@@ -274,6 +281,75 @@ bool showSweepLabels = input.bool(
      true,
      "Show Sweep Labels",
      group = GROUP_LIQUIDITY
+)
+
+
+//====================================================================
+// SESSION INPUTS
+//====================================================================
+
+bool showSessions = input.bool(
+     true,
+     "Show Session Boxes",
+     group = GROUP_SESSIONS
+)
+
+string sessionTimezone = input.string(
+     "America/New_York",
+     "Session Timezone",
+     options = ["America/New_York", "Europe/London", "UTC", "Asia/Tokyo", "Exchange"],
+     group = GROUP_SESSIONS
+)
+
+string asianSessionInput = input.session(
+     "1800-0300",
+     "Asian Session",
+     group = GROUP_SESSIONS
+)
+
+string londonSessionInput = input.session(
+     "0300-1200",
+     "London Session",
+     group = GROUP_SESSIONS
+)
+
+string newYorkSessionInput = input.session(
+     "0800-1700",
+     "New York Session",
+     group = GROUP_SESSIONS
+)
+
+bool showAsianSession = input.bool(
+     true,
+     "Track Asian",
+     group = GROUP_SESSIONS
+)
+
+bool showLondonSession = input.bool(
+     true,
+     "Track London",
+     group = GROUP_SESSIONS
+)
+
+bool showNewYorkSession = input.bool(
+     true,
+     "Track New York",
+     group = GROUP_SESSIONS
+)
+
+bool showSessionLevels = input.bool(
+     true,
+     "Show Completed Session Levels",
+     tooltip = "Extend high / low lines from the most recently completed session ranges.",
+     group = GROUP_SESSIONS
+)
+
+int maxSessionBoxes = input.int(
+     9,
+     "Max Session Boxes",
+     minval = 3,
+     maxval = 60,
+     group = GROUP_SESSIONS
 )
 
 
@@ -1473,11 +1549,395 @@ if barstate.isconfirmed and array.size(liqLevels) > 0
 
 
 //====================================================================
+// SESSION ENGINE
+//====================================================================
+//
+// Tracks Asian / London / New York session ranges.
+//
+// Rules:
+// - Range high / low update only on confirmed bars while inside session
+// - Range locks when the session ends
+// - Session high / low breaks use confirmed closes beyond locked levels
+//
+// Non-repainting:
+// Active ranges do not use intrabar provisional extremes.
+// Breaks require barstate.isconfirmed.
+//====================================================================
+
+color asianSessionColor    = color.rgb(70, 130, 180)
+color londonSessionColor   = color.rgb(210, 160, 60)
+color newYorkSessionColor  = color.rgb(90, 160, 140)
+
+string resolvedSessionTimezone =
+     sessionTimezone == "Exchange" ? syminfo.timezone : sessionTimezone
+
+bool inAsianSession =
+     showAsianSession and
+     not na(time(timeframe.period, asianSessionInput, resolvedSessionTimezone))
+
+bool inLondonSession =
+     showLondonSession and
+     not na(time(timeframe.period, londonSessionInput, resolvedSessionTimezone))
+
+bool inNewYorkSession =
+     showNewYorkSession and
+     not na(time(timeframe.period, newYorkSessionInput, resolvedSessionTimezone))
+
+string currentSessionText =
+     inAsianSession and inLondonSession and inNewYorkSession ? "ALL" :
+     inLondonSession and inNewYorkSession ? "LON/NY" :
+     inAsianSession and inLondonSession ? "ASIA/LON" :
+     inAsianSession and inNewYorkSession ? "ASIA/NY" :
+     inAsianSession ? "ASIAN" :
+     inLondonSession ? "LONDON" :
+     inNewYorkSession ? "NEW YORK" :
+     "OFF"
+
+color currentSessionColor =
+     currentSessionText == "OFF" ? neutralColor :
+     str.contains(currentSessionText, "LON") or currentSessionText == "LONDON" ? londonSessionColor :
+     str.contains(currentSessionText, "NY") or currentSessionText == "NEW YORK" ? newYorkSessionColor :
+     asianSessionColor
+
+var array<box> sessionBoxHistory = array.new_box()
+
+var bool asianWasActive = false
+var float asianHigh = na
+var float asianLow = na
+var int asianStartBar = na
+var box asianBox = na
+var float asianFinalHigh = na
+var float asianFinalLow = na
+var bool asianHighBroken = true
+var bool asianLowBroken = true
+var line asianHighLine = na
+var line asianLowLine = na
+
+var bool londonWasActive = false
+var float londonHigh = na
+var float londonLow = na
+var int londonStartBar = na
+var box londonBox = na
+var float londonFinalHigh = na
+var float londonFinalLow = na
+var bool londonHighBroken = true
+var bool londonLowBroken = true
+var line londonHighLine = na
+var line londonLowLine = na
+
+var bool newYorkWasActive = false
+var float newYorkHigh = na
+var float newYorkLow = na
+var int newYorkStartBar = na
+var box newYorkBox = na
+var float newYorkFinalHigh = na
+var float newYorkFinalLow = na
+var bool newYorkHighBroken = true
+var bool newYorkLowBroken = true
+var line newYorkHighLine = na
+var line newYorkLowLine = na
+
+var string lastSessionEvent = "—"
+
+bool asianCompleteEvent      = false
+bool londonCompleteEvent     = false
+bool newYorkCompleteEvent    = false
+bool asianHighBreakEvent     = false
+bool asianLowBreakEvent      = false
+bool londonHighBreakEvent    = false
+bool londonLowBreakEvent     = false
+bool newYorkHighBreakEvent   = false
+bool newYorkLowBreakEvent    = false
+
+//------------------------------------------------------------
+// ASIAN SESSION
+//------------------------------------------------------------
+
+bool asianStarted = inAsianSession and not asianWasActive
+bool asianEnded   = not inAsianSession and asianWasActive
+
+if asianStarted
+    asianHigh := high
+    asianLow := low
+    asianStartBar := bar_index
+
+    if showSessions
+        asianBox := box.new(
+             bar_index,
+             high,
+             bar_index,
+             low,
+             xloc = xloc.bar_index,
+             border_color = color.new(asianSessionColor, 40),
+             border_width = 1,
+             bgcolor = color.new(asianSessionColor, 90),
+             extend = extend.none
+        )
+        array.push(sessionBoxHistory, asianBox)
+        while array.size(sessionBoxHistory) > maxSessionBoxes
+            box oldSessionBox = array.get(sessionBoxHistory, 0)
+            if not na(oldSessionBox)
+                box.delete(oldSessionBox)
+            array.remove(sessionBoxHistory, 0)
+
+if inAsianSession and barstate.isconfirmed and not na(asianHigh)
+    asianHigh := math.max(asianHigh, high)
+    asianLow := math.min(asianLow, low)
+
+    if showSessions and not na(asianBox)
+        box.set_right(asianBox, bar_index)
+        box.set_top(asianBox, asianHigh)
+        box.set_bottom(asianBox, asianLow)
+
+if asianEnded
+    asianFinalHigh := asianHigh
+    asianFinalLow := asianLow
+    asianHighBroken := false
+    asianLowBroken := false
+    lastSessionEvent := "Asian Complete"
+    asianCompleteEvent := true
+
+    if showSessions and not na(asianBox)
+        box.set_right(asianBox, bar_index - 1)
+
+    if showSessionLevels and not na(asianFinalHigh) and not na(asianFinalLow)
+        if not na(asianHighLine)
+            line.delete(asianHighLine)
+        if not na(asianLowLine)
+            line.delete(asianLowLine)
+
+        asianHighLine := line.new(
+             asianStartBar,
+             asianFinalHigh,
+             bar_index,
+             asianFinalHigh,
+             xloc = xloc.bar_index,
+             extend = extend.right,
+             style = line.style_dashed,
+             color = color.new(asianSessionColor, 35),
+             width = 1
+        )
+
+        asianLowLine := line.new(
+             asianStartBar,
+             asianFinalLow,
+             bar_index,
+             asianFinalLow,
+             xloc = xloc.bar_index,
+             extend = extend.right,
+             style = line.style_dashed,
+             color = color.new(asianSessionColor, 35),
+             width = 1
+        )
+
+asianWasActive := inAsianSession
+
+if barstate.isconfirmed and not na(asianFinalHigh) and not na(asianFinalLow)
+    if not asianHighBroken and close > asianFinalHigh
+        asianHighBroken := true
+        asianHighBreakEvent := true
+        lastSessionEvent := "Asian High Break"
+
+    if not asianLowBroken and close < asianFinalLow
+        asianLowBroken := true
+        asianLowBreakEvent := true
+        lastSessionEvent := "Asian Low Break"
+
+//------------------------------------------------------------
+// LONDON SESSION
+//------------------------------------------------------------
+
+bool londonStarted = inLondonSession and not londonWasActive
+bool londonEnded   = not inLondonSession and londonWasActive
+
+if londonStarted
+    londonHigh := high
+    londonLow := low
+    londonStartBar := bar_index
+
+    if showSessions
+        londonBox := box.new(
+             bar_index,
+             high,
+             bar_index,
+             low,
+             xloc = xloc.bar_index,
+             border_color = color.new(londonSessionColor, 40),
+             border_width = 1,
+             bgcolor = color.new(londonSessionColor, 90),
+             extend = extend.none
+        )
+        array.push(sessionBoxHistory, londonBox)
+        while array.size(sessionBoxHistory) > maxSessionBoxes
+            box oldSessionBox = array.get(sessionBoxHistory, 0)
+            if not na(oldSessionBox)
+                box.delete(oldSessionBox)
+            array.remove(sessionBoxHistory, 0)
+
+if inLondonSession and barstate.isconfirmed and not na(londonHigh)
+    londonHigh := math.max(londonHigh, high)
+    londonLow := math.min(londonLow, low)
+
+    if showSessions and not na(londonBox)
+        box.set_right(londonBox, bar_index)
+        box.set_top(londonBox, londonHigh)
+        box.set_bottom(londonBox, londonLow)
+
+if londonEnded
+    londonFinalHigh := londonHigh
+    londonFinalLow := londonLow
+    londonHighBroken := false
+    londonLowBroken := false
+    lastSessionEvent := "London Complete"
+    londonCompleteEvent := true
+
+    if showSessions and not na(londonBox)
+        box.set_right(londonBox, bar_index - 1)
+
+    if showSessionLevels and not na(londonFinalHigh) and not na(londonFinalLow)
+        if not na(londonHighLine)
+            line.delete(londonHighLine)
+        if not na(londonLowLine)
+            line.delete(londonLowLine)
+
+        londonHighLine := line.new(
+             londonStartBar,
+             londonFinalHigh,
+             bar_index,
+             londonFinalHigh,
+             xloc = xloc.bar_index,
+             extend = extend.right,
+             style = line.style_dashed,
+             color = color.new(londonSessionColor, 35),
+             width = 1
+        )
+
+        londonLowLine := line.new(
+             londonStartBar,
+             londonFinalLow,
+             bar_index,
+             londonFinalLow,
+             xloc = xloc.bar_index,
+             extend = extend.right,
+             style = line.style_dashed,
+             color = color.new(londonSessionColor, 35),
+             width = 1
+        )
+
+londonWasActive := inLondonSession
+
+if barstate.isconfirmed and not na(londonFinalHigh) and not na(londonFinalLow)
+    if not londonHighBroken and close > londonFinalHigh
+        londonHighBroken := true
+        londonHighBreakEvent := true
+        lastSessionEvent := "London High Break"
+
+    if not londonLowBroken and close < londonFinalLow
+        londonLowBroken := true
+        londonLowBreakEvent := true
+        lastSessionEvent := "London Low Break"
+
+//------------------------------------------------------------
+// NEW YORK SESSION
+//------------------------------------------------------------
+
+bool newYorkStarted = inNewYorkSession and not newYorkWasActive
+bool newYorkEnded   = not inNewYorkSession and newYorkWasActive
+
+if newYorkStarted
+    newYorkHigh := high
+    newYorkLow := low
+    newYorkStartBar := bar_index
+
+    if showSessions
+        newYorkBox := box.new(
+             bar_index,
+             high,
+             bar_index,
+             low,
+             xloc = xloc.bar_index,
+             border_color = color.new(newYorkSessionColor, 40),
+             border_width = 1,
+             bgcolor = color.new(newYorkSessionColor, 90),
+             extend = extend.none
+        )
+        array.push(sessionBoxHistory, newYorkBox)
+        while array.size(sessionBoxHistory) > maxSessionBoxes
+            box oldSessionBox = array.get(sessionBoxHistory, 0)
+            if not na(oldSessionBox)
+                box.delete(oldSessionBox)
+            array.remove(sessionBoxHistory, 0)
+
+if inNewYorkSession and barstate.isconfirmed and not na(newYorkHigh)
+    newYorkHigh := math.max(newYorkHigh, high)
+    newYorkLow := math.min(newYorkLow, low)
+
+    if showSessions and not na(newYorkBox)
+        box.set_right(newYorkBox, bar_index)
+        box.set_top(newYorkBox, newYorkHigh)
+        box.set_bottom(newYorkBox, newYorkLow)
+
+if newYorkEnded
+    newYorkFinalHigh := newYorkHigh
+    newYorkFinalLow := newYorkLow
+    newYorkHighBroken := false
+    newYorkLowBroken := false
+    lastSessionEvent := "NY Complete"
+    newYorkCompleteEvent := true
+
+    if showSessions and not na(newYorkBox)
+        box.set_right(newYorkBox, bar_index - 1)
+
+    if showSessionLevels and not na(newYorkFinalHigh) and not na(newYorkFinalLow)
+        if not na(newYorkHighLine)
+            line.delete(newYorkHighLine)
+        if not na(newYorkLowLine)
+            line.delete(newYorkLowLine)
+
+        newYorkHighLine := line.new(
+             newYorkStartBar,
+             newYorkFinalHigh,
+             bar_index,
+             newYorkFinalHigh,
+             xloc = xloc.bar_index,
+             extend = extend.right,
+             style = line.style_dashed,
+             color = color.new(newYorkSessionColor, 35),
+             width = 1
+        )
+
+        newYorkLowLine := line.new(
+             newYorkStartBar,
+             newYorkFinalLow,
+             bar_index,
+             newYorkFinalLow,
+             xloc = xloc.bar_index,
+             extend = extend.right,
+             style = line.style_dashed,
+             color = color.new(newYorkSessionColor, 35),
+             width = 1
+        )
+
+newYorkWasActive := inNewYorkSession
+
+if barstate.isconfirmed and not na(newYorkFinalHigh) and not na(newYorkFinalLow)
+    if not newYorkHighBroken and close > newYorkFinalHigh
+        newYorkHighBroken := true
+        newYorkHighBreakEvent := true
+        lastSessionEvent := "NY High Break"
+
+    if not newYorkLowBroken and close < newYorkFinalLow
+        newYorkLowBroken := true
+        newYorkLowBreakEvent := true
+        lastSessionEvent := "NY Low Break"
+
+
+//====================================================================
 // CORE BIAS ENGINE
 //====================================================================
 //
 // Intentionally unchanged from v0.1 scoring so Phase 1 bias behavior
-// remains stable. Later confidence phases may incorporate OB / FVG / Liq.
+// remains stable. Later confidence phases may incorporate session state.
 //====================================================================
 
 int bullishPoints = 0
@@ -1541,7 +2001,7 @@ float alignmentScore =
 
 
 //====================================================================
-// LAST EVENT / OB / FVG / LIQUIDITY COLORS
+// LAST EVENT / OB / FVG / LIQUIDITY / SESSION COLORS
 //====================================================================
 
 color lastEventColor =
@@ -1564,6 +2024,14 @@ color lastLiquidityColor =
      str.contains(lastLiquidityEvent, "EQH") ? bearishColor :
      neutralColor
 
+color lastSessionEventColor =
+     str.contains(lastSessionEvent, "High Break") ? bullishColor :
+     str.contains(lastSessionEvent, "Low Break") ? bearishColor :
+     str.contains(lastSessionEvent, "Asian") ? asianSessionColor :
+     str.contains(lastSessionEvent, "London") ? londonSessionColor :
+     str.contains(lastSessionEvent, "NY") ? newYorkSessionColor :
+     neutralColor
+
 
 //====================================================================
 // DASHBOARD
@@ -1572,7 +2040,7 @@ color lastLiquidityColor =
 var table dashboard = table.new(
      position.top_right,
      2,
-     11,
+     13,
      bgcolor = color.new(color.black, 15),
      frame_color = color.new(color.white, 70),
      frame_width = 1,
@@ -1602,7 +2070,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v0.5",
+             "v0.6",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small
@@ -1649,14 +2117,14 @@ if barstate.islast
         )
 
         //------------------------------------------------------------
-        // LAST EVENT
+        // SESSION
         //------------------------------------------------------------
 
         table.cell(
              dashboard,
              0,
              3,
-             "Last Event",
+             "Session",
              text_color = color.silver
         )
 
@@ -1664,6 +2132,26 @@ if barstate.islast
              dashboard,
              1,
              3,
+             currentSessionText,
+             text_color = currentSessionColor
+        )
+
+        //------------------------------------------------------------
+        // LAST EVENT
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             4,
+             "Last Event",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             4,
              lastEvent,
              text_color = lastEventColor
         )
@@ -1675,7 +2163,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             4,
+             5,
              "Last OB",
              text_color = color.silver
         )
@@ -1683,7 +2171,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             4,
+             5,
              lastObEvent,
              text_color = lastObColor
         )
@@ -1695,7 +2183,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             5,
+             6,
              "Last FVG",
              text_color = color.silver
         )
@@ -1703,7 +2191,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             5,
+             6,
              lastFvgEvent,
              text_color = lastFvgColor
         )
@@ -1715,7 +2203,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             6,
+             7,
              "Last Liq",
              text_color = color.silver
         )
@@ -1723,9 +2211,29 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             6,
+             7,
              lastLiquidityEvent,
              text_color = lastLiquidityColor
+        )
+
+        //------------------------------------------------------------
+        // LAST SESSION EVENT
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             8,
+             "Last Sess",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             8,
+             lastSessionEvent,
+             text_color = lastSessionEventColor
         )
 
         //------------------------------------------------------------
@@ -1735,7 +2243,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             7,
+             9,
              "Last High",
              text_color = color.silver
         )
@@ -1743,7 +2251,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             7,
+             9,
              lastHighType,
              text_color =
                  lastHighType == "HH"
@@ -1760,7 +2268,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             8,
+             10,
              "Last Low",
              text_color = color.silver
         )
@@ -1768,7 +2276,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             8,
+             10,
              lastLowType,
              text_color =
                  lastLowType == "HL"
@@ -1785,7 +2293,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             9,
+             11,
              "Alignment",
              text_color = color.silver
         )
@@ -1793,7 +2301,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             9,
+             11,
              str.tostring(
                  alignmentScore,
                  "#"
@@ -1808,7 +2316,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             10,
+             12,
              "Bias",
              text_color = color.silver
         )
@@ -1816,7 +2324,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             10,
+             12,
              marketBias,
              text_color = marketBiasColor,
              bgcolor = color.new(
@@ -1832,7 +2340,7 @@ if barstate.islast
              0,
              0,
              1,
-             10
+             12
         )
 
 
@@ -1840,8 +2348,8 @@ if barstate.islast
 // ALERTS
 //====================================================================
 //
-// One-bar pulses only. Structure, OB, FVG, and Liquidity events inherit
-// the confirmed-close non-repainting policy from earlier engines.
+// One-bar pulses only. Structure, OB, FVG, Liquidity, and Session
+// events inherit the confirmed-close non-repainting policy.
 //====================================================================
 
 alertcondition(
@@ -1962,4 +2470,58 @@ alertcondition(
      eqlSweepEvent,
      title = "EQL Sweep",
      message = "AlphaFX AI: Equal Low liquidity swept"
+)
+
+alertcondition(
+     asianCompleteEvent,
+     title = "Asian Session Complete",
+     message = "AlphaFX AI: Asian session range locked"
+)
+
+alertcondition(
+     londonCompleteEvent,
+     title = "London Session Complete",
+     message = "AlphaFX AI: London session range locked"
+)
+
+alertcondition(
+     newYorkCompleteEvent,
+     title = "New York Session Complete",
+     message = "AlphaFX AI: New York session range locked"
+)
+
+alertcondition(
+     asianHighBreakEvent,
+     title = "Asian High Break",
+     message = "AlphaFX AI: Confirmed close above Asian session high"
+)
+
+alertcondition(
+     asianLowBreakEvent,
+     title = "Asian Low Break",
+     message = "AlphaFX AI: Confirmed close below Asian session low"
+)
+
+alertcondition(
+     londonHighBreakEvent,
+     title = "London High Break",
+     message = "AlphaFX AI: Confirmed close above London session high"
+)
+
+alertcondition(
+     londonLowBreakEvent,
+     title = "London Low Break",
+     message = "AlphaFX AI: Confirmed close below London session low"
+)
+
+alertcondition(
+     newYorkHighBreakEvent,
+     title = "New York High Break",
+     message = "AlphaFX AI: Confirmed close above New York session high"
+)
+
+alertcondition(
+     newYorkLowBreakEvent,
+     title = "New York Low Break",
+     message = "AlphaFX AI: Confirmed close below New York session low"
 )
