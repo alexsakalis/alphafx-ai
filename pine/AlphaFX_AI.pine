@@ -1,16 +1,16 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v0.8.0-alpha]",
+    "AlphaFX AI [v0.9.0-alpha]",
     shorttitle = "AlphaFX AI",
     overlay = true,
     max_labels_count = 500,
-    max_lines_count = 300,
+    max_lines_count = 350,
     max_boxes_count = 300
 )
 
 //====================================================================
 // ALPHAFX AI
-// Version: 0.8.0-alpha
+// Version: 0.9.0-alpha
 //
 // Phase 1:
 // - EMA Trend Engine
@@ -54,6 +54,10 @@ indicator(
 // - Confidence Engine
 // - Confluence Scoring + Grades
 //
+// Phase 9:
+// - Risk Engine
+// - Structure-based SL / TP / RR
+//
 // Design:
 // - Confirmed structure only
 // - No future-looking data
@@ -64,7 +68,7 @@ indicator(
 // - Session highs / lows lock when the session ends
 // - HTF data uses completed higher-timeframe bars only
 // - Confidence measures confluence, not win probability
-// - Foundation for Risk module
+// - Risk levels use confirmed swings + ATR buffer only
 //====================================================================
 
 
@@ -81,6 +85,7 @@ string GROUP_LIQUIDITY  = "Liquidity"
 string GROUP_SESSIONS   = "Sessions"
 string GROUP_MTF        = "Multi-Timeframe"
 string GROUP_CONFIDENCE = "Confidence"
+string GROUP_RISK       = "Risk"
 string GROUP_VISUALS    = "Visuals"
 string GROUP_DASHBOARD  = "Dashboard"
 
@@ -411,6 +416,77 @@ int mtfConflictPenalty = input.int(
      maxval = 40,
      tooltip = "Points subtracted from confidence when chart and HTF trends conflict.",
      group = GROUP_CONFIDENCE
+)
+
+
+//====================================================================
+// RISK INPUTS
+//====================================================================
+
+bool enableRisk = input.bool(
+     true,
+     "Enable Risk Engine",
+     tooltip = "Builds structure-based stop / target guidance from confirmed swings. Educational risk model only.",
+     group = GROUP_RISK
+)
+
+bool showRiskLevels = input.bool(
+     true,
+     "Show SL / TP Levels",
+     group = GROUP_RISK
+)
+
+float riskAtrBuffer = input.float(
+     0.15,
+     "Stop ATR Buffer",
+     minval = 0.0,
+     step = 0.05,
+     tooltip = "Extra ATR distance beyond the confirmed swing used for the stop.",
+     group = GROUP_RISK
+)
+
+float rewardRiskTp1 = input.float(
+     1.0,
+     "TP1 Reward:Risk",
+     minval = 0.5,
+     step = 0.1,
+     group = GROUP_RISK
+)
+
+float rewardRiskTp2 = input.float(
+     2.0,
+     "TP2 Reward:Risk",
+     minval = 0.5,
+     step = 0.1,
+     group = GROUP_RISK
+)
+
+int minConfidenceForRisk = input.int(
+     60,
+     "Min Confidence for Risk Model",
+     minval = 0,
+     maxval = 100,
+     tooltip = "Risk levels appear only when confidence reaches this score with a clear direction.",
+     group = GROUP_RISK
+)
+
+float accountEquity = input.float(
+     10000.0,
+     "Account Equity",
+     minval = 1.0,
+     step = 100.0,
+     tooltip = "Used only for suggested position-size math.",
+     group = GROUP_RISK
+)
+
+float riskPercent = input.float(
+     1.0,
+     "Risk Percent",
+     minval = 0.1,
+     maxval = 10.0,
+     step = 0.1,
+     tooltip = "Percent of account equity risked if stop is hit.",
+     group = GROUP_RISK
 )
 
 
@@ -2373,6 +2449,243 @@ previousConfidenceDirection := confidenceDirection
 
 
 //====================================================================
+// RISK ENGINE
+//====================================================================
+//
+// Builds an educational risk model from confirmed structure:
+// - Direction from Confidence Engine (clear bullish / bearish only)
+// - Entry reference = confirmed close
+// - Stop beyond active confirmed swing +/- ATR buffer
+// - TP1 / TP2 from configured reward:risk multiples
+//
+// Non-repainting:
+// - Requires barstate.isconfirmed for model updates
+// - Uses confirmed swing levels only
+// - No future-looking projections beyond fixed R multiples
+//====================================================================
+
+float riskAtr = ta.atr(14)
+
+var float riskEntry = na
+var float riskStop = na
+var float riskTp1 = na
+var float riskTp2 = na
+var float riskDistance = na
+var float riskSuggestedQty = na
+var int riskDirection = 0
+var bool riskModelValid = false
+
+var line riskStopLine = na
+var line riskTp1Line = na
+var line riskTp2Line = na
+
+bool riskModelReadyBullishEvent = false
+bool riskModelReadyBearishEvent = false
+bool riskModelInvalidEvent = false
+
+var bool previousRiskModelValid = false
+var int previousRiskDirection = 0
+
+if enableRisk and barstate.isconfirmed
+    bool confidenceAllowsRisk =
+         confidenceDirection != 0 and
+         confidenceScore >= minConfidenceForRisk
+
+    bool swingsReady =
+         not na(activeSwingHigh) and
+         not na(activeSwingLow)
+
+    if confidenceAllowsRisk and swingsReady
+        int modelDirection = confidenceDirection
+        float modelEntry = close
+        float atrBuffer = riskAtr * riskAtrBuffer
+
+        float modelStop =
+             modelDirection == 1
+                 ? activeSwingLow - atrBuffer
+                 : activeSwingHigh + atrBuffer
+
+        float modelRiskDistance =
+             modelDirection == 1
+                 ? modelEntry - modelStop
+                 : modelStop - modelEntry
+
+        bool modelValid = modelRiskDistance > 0
+
+        if modelValid
+            float modelTp1 =
+                 modelDirection == 1
+                     ? modelEntry + modelRiskDistance * rewardRiskTp1
+                     : modelEntry - modelRiskDistance * rewardRiskTp1
+
+            float modelTp2 =
+                 modelDirection == 1
+                     ? modelEntry + modelRiskDistance * rewardRiskTp2
+                     : modelEntry - modelRiskDistance * rewardRiskTp2
+
+            float riskAmount = accountEquity * (riskPercent / 100.0)
+            float pointValue = syminfo.pointvalue
+            float modelQty =
+                 pointValue > 0
+                     ? riskAmount / (modelRiskDistance * pointValue)
+                     : na
+
+            bool becameReady =
+                 not previousRiskModelValid or
+                 previousRiskDirection != modelDirection
+
+            riskEntry := modelEntry
+            riskStop := modelStop
+            riskTp1 := modelTp1
+            riskTp2 := modelTp2
+            riskDistance := modelRiskDistance
+            riskSuggestedQty := modelQty
+            riskDirection := modelDirection
+            riskModelValid := true
+
+            if becameReady and modelDirection == 1
+                riskModelReadyBullishEvent := true
+            if becameReady and modelDirection == -1
+                riskModelReadyBearishEvent := true
+
+            if showRiskLevels
+                if not na(riskStopLine)
+                    line.delete(riskStopLine)
+                if not na(riskTp1Line)
+                    line.delete(riskTp1Line)
+                if not na(riskTp2Line)
+                    line.delete(riskTp2Line)
+
+                color stopColor = color.new(bearishColor, 10)
+                color tpColor = color.new(bullishColor, 10)
+
+                riskStopLine := line.new(
+                     bar_index,
+                     modelStop,
+                     bar_index + 1,
+                     modelStop,
+                     xloc = xloc.bar_index,
+                     extend = extend.right,
+                     style = line.style_solid,
+                     color = stopColor,
+                     width = 2
+                )
+
+                riskTp1Line := line.new(
+                     bar_index,
+                     modelTp1,
+                     bar_index + 1,
+                     modelTp1,
+                     xloc = xloc.bar_index,
+                     extend = extend.right,
+                     style = line.style_dashed,
+                     color = tpColor,
+                     width = 1
+                )
+
+                riskTp2Line := line.new(
+                     bar_index,
+                     modelTp2,
+                     bar_index + 1,
+                     modelTp2,
+                     xloc = xloc.bar_index,
+                     extend = extend.right,
+                     style = line.style_dotted,
+                     color = tpColor,
+                     width = 1
+                )
+        else
+            if previousRiskModelValid
+                riskModelInvalidEvent := true
+
+            riskModelValid := false
+            riskDirection := 0
+            riskEntry := na
+            riskStop := na
+            riskTp1 := na
+            riskTp2 := na
+            riskDistance := na
+            riskSuggestedQty := na
+
+            if not na(riskStopLine)
+                line.delete(riskStopLine)
+            if not na(riskTp1Line)
+                line.delete(riskTp1Line)
+            if not na(riskTp2Line)
+                line.delete(riskTp2Line)
+
+            riskStopLine := na
+            riskTp1Line := na
+            riskTp2Line := na
+    else
+        if previousRiskModelValid
+            riskModelInvalidEvent := true
+
+        riskModelValid := false
+        riskDirection := 0
+        riskEntry := na
+        riskStop := na
+        riskTp1 := na
+        riskTp2 := na
+        riskDistance := na
+        riskSuggestedQty := na
+
+        if not na(riskStopLine)
+            line.delete(riskStopLine)
+        if not na(riskTp1Line)
+            line.delete(riskTp1Line)
+        if not na(riskTp2Line)
+            line.delete(riskTp2Line)
+
+        riskStopLine := na
+        riskTp1Line := na
+        riskTp2Line := na
+
+    previousRiskModelValid := riskModelValid
+    previousRiskDirection := riskDirection
+else if not enableRisk
+    riskModelValid := false
+    riskDirection := 0
+    if not na(riskStopLine)
+        line.delete(riskStopLine)
+    if not na(riskTp1Line)
+        line.delete(riskTp1Line)
+    if not na(riskTp2Line)
+        line.delete(riskTp2Line)
+    riskStopLine := na
+    riskTp1Line := na
+    riskTp2Line := na
+
+string riskDirectionText =
+     not enableRisk ? "OFF" :
+     not riskModelValid ? "WAIT" :
+     riskDirection == 1 ? "LONG" :
+     riskDirection == -1 ? "SHORT" :
+     "WAIT"
+
+string riskRrText =
+     not enableRisk ? "OFF" :
+     not riskModelValid ? "—" :
+     "1:" + str.tostring(rewardRiskTp2, "#.#")
+
+string riskText =
+     not enableRisk ? "OFF" :
+     not riskModelValid ? "WAIT" :
+     riskDirectionText + " " + riskRrText
+
+color riskColor =
+     not enableRisk or not riskModelValid ? neutralColor :
+     riskDirection == 1 ? bullishColor :
+     riskDirection == -1 ? bearishColor :
+     neutralColor
+
+string riskQtyText =
+     not enableRisk or not riskModelValid or na(riskSuggestedQty)
+         ? "—"
+         : str.tostring(riskSuggestedQty, "#.###")
+
+
+//====================================================================
 // LAST EVENT / OB / FVG / LIQUIDITY / SESSION COLORS
 //====================================================================
 
@@ -2412,7 +2725,7 @@ color lastSessionEventColor =
 var table dashboard = table.new(
      position.top_right,
      2,
-     16,
+     18,
      bgcolor = color.new(color.black, 15),
      frame_color = color.new(color.white, 70),
      frame_width = 1,
@@ -2442,7 +2755,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v0.8",
+             "v0.9",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small
@@ -2745,14 +3058,14 @@ if barstate.islast
         )
 
         //------------------------------------------------------------
-        // BIAS
+        // RISK
         //------------------------------------------------------------
 
         table.cell(
              dashboard,
              0,
              15,
-             "Bias",
+             "Risk",
              text_color = color.silver
         )
 
@@ -2760,6 +3073,47 @@ if barstate.islast
              dashboard,
              1,
              15,
+             riskText,
+             text_color = riskColor,
+             bgcolor = color.new(riskColor, 88)
+        )
+
+        //------------------------------------------------------------
+        // RISK SIZE
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             16,
+             "Risk Size",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             16,
+             riskQtyText,
+             text_color = riskColor
+        )
+
+        //------------------------------------------------------------
+        // BIAS
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             17,
+             "Bias",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             17,
              marketBias,
              text_color = marketBiasColor,
              bgcolor = color.new(
@@ -2775,7 +3129,7 @@ if barstate.islast
              0,
              0,
              1,
-             15
+             17
         )
 
 
@@ -2989,4 +3343,22 @@ alertcondition(
      highConfidenceBearishEvent,
      title = "High Confidence Bearish",
      message = "AlphaFX AI: Bearish confluence confidence crossed the alert threshold"
+)
+
+alertcondition(
+     riskModelReadyBullishEvent,
+     title = "Risk Model Long Ready",
+     message = "AlphaFX AI: Long risk model ready from confirmed structure"
+)
+
+alertcondition(
+     riskModelReadyBearishEvent,
+     title = "Risk Model Short Ready",
+     message = "AlphaFX AI: Short risk model ready from confirmed structure"
+)
+
+alertcondition(
+     riskModelInvalidEvent,
+     title = "Risk Model Invalid",
+     message = "AlphaFX AI: Risk model invalidated or unavailable"
 )
