@@ -1,6 +1,6 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v0.6.0-alpha]",
+    "AlphaFX AI [v0.7.0-alpha]",
     shorttitle = "AlphaFX AI",
     overlay = true,
     max_labels_count = 500,
@@ -10,7 +10,7 @@ indicator(
 
 //====================================================================
 // ALPHAFX AI
-// Version: 0.6.0-alpha
+// Version: 0.7.0-alpha
 //
 // Phase 1:
 // - EMA Trend Engine
@@ -46,6 +46,10 @@ indicator(
 // - Confirmed Session Ranges
 // - Session High / Low Breaks
 //
+// Phase 7:
+// - Multi-Timeframe Engine
+// - Confirmed HTF Trend Alignment
+//
 // Design:
 // - Confirmed structure only
 // - No future-looking data
@@ -54,7 +58,8 @@ indicator(
 // - FVGs use confirmed 3-candle imbalances only
 // - Liquidity uses confirmed swing equals only
 // - Session highs / lows lock when the session ends
-// - Foundation for MTF / Confidence modules
+// - HTF data uses completed higher-timeframe bars only
+// - Foundation for Confidence / Risk modules
 //====================================================================
 
 
@@ -69,6 +74,7 @@ string GROUP_OB        = "Order Blocks"
 string GROUP_FVG       = "Fair Value Gaps"
 string GROUP_LIQUIDITY = "Liquidity"
 string GROUP_SESSIONS  = "Sessions"
+string GROUP_MTF       = "Multi-Timeframe"
 string GROUP_VISUALS   = "Visuals"
 string GROUP_DASHBOARD = "Dashboard"
 
@@ -350,6 +356,25 @@ int maxSessionBoxes = input.int(
      minval = 3,
      maxval = 60,
      group = GROUP_SESSIONS
+)
+
+
+//====================================================================
+// MULTI-TIMEFRAME INPUTS
+//====================================================================
+
+bool enableMtf = input.bool(
+     true,
+     "Enable Multi-Timeframe",
+     tooltip = "Uses only completed higher-timeframe bars (non-repainting).",
+     group = GROUP_MTF
+)
+
+string mtfTimeframe = input.timeframe(
+     "60",
+     "Higher Timeframe",
+     tooltip = "Confirmed HTF trend is compared against the chart timeframe trend and structure.",
+     group = GROUP_MTF
 )
 
 
@@ -1933,11 +1958,147 @@ if barstate.isconfirmed and not na(newYorkFinalHigh) and not na(newYorkFinalLow)
 
 
 //====================================================================
+// MULTI-TIMEFRAME ENGINE
+//====================================================================
+//
+// Confirmed HTF trend uses the same EMA stack rules as the chart
+// timeframe, evaluated on the higher timeframe.
+//
+// Non-repainting policy:
+// - lookahead_off
+// - series offset [1] so only the last completed HTF bar is used
+//
+// Alignment:
+// - Trend Align: chart trendState matches HTF trend
+// - Structure Align: structuralDirection matches HTF trend
+//====================================================================
+
+// Returns 1 / 0 / -1 using the shared EMA trend rules.
+calcTrendState() =>
+    float calcEmaFast = ta.ema(close, fastEmaLength)
+    float calcEmaMedium = ta.ema(close, mediumEmaLength)
+    float calcEmaSlow = ta.ema(close, slowEmaLength)
+
+    bool calcEmaBullish =
+         calcEmaFast > calcEmaMedium and
+         calcEmaMedium > calcEmaSlow
+
+    bool calcEmaBearish =
+         calcEmaFast < calcEmaMedium and
+         calcEmaMedium < calcEmaSlow
+
+    bool calcPriceBullish =
+         not usePriceFilter or
+         close > calcEmaSlow
+
+    bool calcPriceBearish =
+         not usePriceFilter or
+         close < calcEmaSlow
+
+    bool calcBullishTrend =
+         calcEmaBullish and
+         calcPriceBullish
+
+    bool calcBearishTrend =
+         calcEmaBearish and
+         calcPriceBearish
+
+    calcBullishTrend ? 1 : calcBearishTrend ? -1 : 0
+
+// Always request for series consistency; gate usage with enableMtf.
+int htfTrendStateRaw = request.security(
+     syminfo.tickerid,
+     mtfTimeframe,
+     calcTrendState()[1],
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off
+)
+
+int htfTrendState = enableMtf ? htfTrendStateRaw : 0
+
+string htfTrendText =
+     not enableMtf ? "OFF" :
+     htfTrendState == 1 ? "BULLISH" :
+     htfTrendState == -1 ? "BEARISH" :
+     "NEUTRAL"
+
+color htfTrendColor =
+     not enableMtf ? neutralColor :
+     htfTrendState == 1 ? bullishColor :
+     htfTrendState == -1 ? bearishColor :
+     neutralColor
+
+bool mtfTrendBullishAligned =
+     enableMtf and
+     trendState == 1 and
+     htfTrendState == 1
+
+bool mtfTrendBearishAligned =
+     enableMtf and
+     trendState == -1 and
+     htfTrendState == -1
+
+bool mtfTrendConflict =
+     enableMtf and
+     trendState != 0 and
+     htfTrendState != 0 and
+     trendState != htfTrendState
+
+bool mtfStructureBullishAligned =
+     enableMtf and
+     structuralDirection == 1 and
+     htfTrendState == 1
+
+bool mtfStructureBearishAligned =
+     enableMtf and
+     structuralDirection == -1 and
+     htfTrendState == -1
+
+string mtfAlignText =
+     not enableMtf ? "OFF" :
+     mtfTrendBullishAligned ? "BULL ALIGN" :
+     mtfTrendBearishAligned ? "BEAR ALIGN" :
+     mtfTrendConflict ? "CONFLICT" :
+     mtfStructureBullishAligned ? "STRUCT BULL" :
+     mtfStructureBearishAligned ? "STRUCT BEAR" :
+     "MIXED"
+
+color mtfAlignColor =
+     mtfTrendBullishAligned ? bullishColor :
+     mtfTrendBearishAligned ? bearishColor :
+     mtfTrendConflict ? bearishColor :
+     neutralColor
+
+bool mtfBullishAlignEvent = false
+bool mtfBearishAlignEvent = false
+bool mtfConflictEvent = false
+
+var int previousMtfAlignState = 0
+// 1 = bull align, -1 = bear align, 2 = conflict, 0 = other
+
+int currentMtfAlignState =
+     mtfTrendBullishAligned ? 1 :
+     mtfTrendBearishAligned ? -1 :
+     mtfTrendConflict ? 2 :
+     0
+
+if enableMtf and currentMtfAlignState != previousMtfAlignState
+    if currentMtfAlignState == 1
+        mtfBullishAlignEvent := true
+    else if currentMtfAlignState == -1
+        mtfBearishAlignEvent := true
+    else if currentMtfAlignState == 2
+        mtfConflictEvent := true
+
+previousMtfAlignState := currentMtfAlignState
+
+
+//====================================================================
 // CORE BIAS ENGINE
 //====================================================================
 //
-// Intentionally unchanged from v0.1 scoring so Phase 1 bias behavior
-// remains stable. Later confidence phases may incorporate session state.
+// Chart bias remains Phase 1 scoring. MTF alignment is reported
+// separately and will feed the Confidence Engine in a later phase.
 //====================================================================
 
 int bullishPoints = 0
@@ -2040,7 +2201,7 @@ color lastSessionEventColor =
 var table dashboard = table.new(
      position.top_right,
      2,
-     13,
+     15,
      bgcolor = color.new(color.black, 15),
      frame_color = color.new(color.white, 70),
      frame_width = 1,
@@ -2070,7 +2231,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v0.6",
+             "v0.7",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small
@@ -2097,14 +2258,14 @@ if barstate.islast
         )
 
         //------------------------------------------------------------
-        // STRUCTURE
+        // HTF TREND
         //------------------------------------------------------------
 
         table.cell(
              dashboard,
              0,
              2,
-             "Structure",
+             "HTF Trend",
              text_color = color.silver
         )
 
@@ -2112,6 +2273,46 @@ if barstate.islast
              dashboard,
              1,
              2,
+             htfTrendText,
+             text_color = htfTrendColor
+        )
+
+        //------------------------------------------------------------
+        // MTF ALIGN
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             3,
+             "MTF Align",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             3,
+             mtfAlignText,
+             text_color = mtfAlignColor
+        )
+
+        //------------------------------------------------------------
+        // STRUCTURE
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             4,
+             "Structure",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             4,
              structureText,
              text_color = structureColor
         )
@@ -2123,7 +2324,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             3,
+             5,
              "Session",
              text_color = color.silver
         )
@@ -2131,7 +2332,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             3,
+             5,
              currentSessionText,
              text_color = currentSessionColor
         )
@@ -2143,7 +2344,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             4,
+             6,
              "Last Event",
              text_color = color.silver
         )
@@ -2151,7 +2352,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             4,
+             6,
              lastEvent,
              text_color = lastEventColor
         )
@@ -2163,7 +2364,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             5,
+             7,
              "Last OB",
              text_color = color.silver
         )
@@ -2171,7 +2372,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             5,
+             7,
              lastObEvent,
              text_color = lastObColor
         )
@@ -2183,7 +2384,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             6,
+             8,
              "Last FVG",
              text_color = color.silver
         )
@@ -2191,7 +2392,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             6,
+             8,
              lastFvgEvent,
              text_color = lastFvgColor
         )
@@ -2203,7 +2404,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             7,
+             9,
              "Last Liq",
              text_color = color.silver
         )
@@ -2211,7 +2412,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             7,
+             9,
              lastLiquidityEvent,
              text_color = lastLiquidityColor
         )
@@ -2223,7 +2424,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             8,
+             10,
              "Last Sess",
              text_color = color.silver
         )
@@ -2231,7 +2432,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             8,
+             10,
              lastSessionEvent,
              text_color = lastSessionEventColor
         )
@@ -2243,7 +2444,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             9,
+             11,
              "Last High",
              text_color = color.silver
         )
@@ -2251,7 +2452,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             9,
+             11,
              lastHighType,
              text_color =
                  lastHighType == "HH"
@@ -2268,7 +2469,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             10,
+             12,
              "Last Low",
              text_color = color.silver
         )
@@ -2276,7 +2477,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             10,
+             12,
              lastLowType,
              text_color =
                  lastLowType == "HL"
@@ -2293,7 +2494,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             11,
+             13,
              "Alignment",
              text_color = color.silver
         )
@@ -2301,7 +2502,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             11,
+             13,
              str.tostring(
                  alignmentScore,
                  "#"
@@ -2316,7 +2517,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             12,
+             14,
              "Bias",
              text_color = color.silver
         )
@@ -2324,7 +2525,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             12,
+             14,
              marketBias,
              text_color = marketBiasColor,
              bgcolor = color.new(
@@ -2340,7 +2541,7 @@ if barstate.islast
              0,
              0,
              1,
-             12
+             14
         )
 
 
@@ -2524,4 +2725,22 @@ alertcondition(
      newYorkLowBreakEvent,
      title = "New York Low Break",
      message = "AlphaFX AI: Confirmed close below New York session low"
+)
+
+alertcondition(
+     mtfBullishAlignEvent,
+     title = "MTF Bullish Alignment",
+     message = "AlphaFX AI: Chart and HTF trends aligned bullish"
+)
+
+alertcondition(
+     mtfBearishAlignEvent,
+     title = "MTF Bearish Alignment",
+     message = "AlphaFX AI: Chart and HTF trends aligned bearish"
+)
+
+alertcondition(
+     mtfConflictEvent,
+     title = "MTF Conflict",
+     message = "AlphaFX AI: Chart and HTF trends are in conflict"
 )
