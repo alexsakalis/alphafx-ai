@@ -2,7 +2,7 @@
 
 Professional Smart Money Concepts indicator for TradingView, written in Pine Script v6.
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Professional Release
 
 ## What it is
@@ -34,12 +34,21 @@ It combines trend, market structure, BOS/CHoCH, order blocks, fair value gaps, l
 | Confidence | Confluence score and grade |
 | Risk | Structure-based SL / TP / size model |
 
+## Profiles
+
+| Profile | Intent |
+|---------|--------|
+| Scalp | Faster structure, lower HTF (`15`), looser confidence gate |
+| Intraday | Balanced defaults (recommended starting point) |
+| Swing | Larger pivots, HTF `240`, stricter confluence / risk gates |
+| Custom | Full manual control of tunable inputs |
+
 ## Install (TradingView)
 
 1. Open TradingView Pine Editor
 2. Paste contents of [`pine/AlphaFX_AI.pine`](pine/AlphaFX_AI.pine)
 3. Save and add to chart
-4. Configure inputs by engine group
+4. Choose a Profile, then tune visuals as needed
 
 ## Repository layout
 

@@ -2,6 +2,19 @@
 
 All notable changes to AlphaFX AI are documented in this file.
 
+## 1.1.0
+
+### Added
+
+- Profile presets: Custom, Scalp, Intraday, Swing
+- Preset-resolved structure, FVG, liquidity, MTF, confidence, and risk settings
+- Dashboard Profile row
+
+### Notes
+
+- Visual toggles remain user-controlled under all presets
+- Custom profile uses the manual inputs exactly
+
 ## 1.0.0
 
 ### Release

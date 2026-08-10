@@ -2,7 +2,7 @@
 
 Reserved for optional future extraction of AlphaFX AI engines into separate Pine include files.
 
-Current release (`1.0.0`) ships as a single production script:
+Current release (`1.1.0`) ships as a single production script:
 
 [`../AlphaFX_AI.pine`](../AlphaFX_AI.pine)
 

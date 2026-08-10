@@ -1,5 +1,14 @@
 # Features
 
+## Profile Presets
+
+- **Scalp** — tighter pivots, more reactive zones, HTF `15`
+- **Intraday** — balanced defaults, HTF `60`
+- **Swing** — larger pivots, stricter FVG/risk gates, HTF `240`
+- **Custom** — uses manual inputs for all tunable parameters
+
+Visual toggles (labels, boxes, lines, dashboard) stay user-controlled in every profile.
+
 ## Trend Engine
 
 - Fast / medium / slow EMA stack (default 20 / 50 / 200)

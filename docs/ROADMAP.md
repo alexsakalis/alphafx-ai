@@ -17,16 +17,15 @@
 
 ## Current
 
-**1.0.0** — professional release. Feature-complete SMC pipeline.
+**1.1.0** — professional release + profile presets (Scalp / Intraday / Swing / Custom).
 
-## Post-1.0 ideas
+## Post-1.1 ideas
 
 1. Chart screenshots in `assets/screenshots/`
-2. Preset profiles (scalp / intraday / swing)
-3. Optional engine extraction into `pine/modules/`
-4. Additional killzone / news filters
-5. Performance profiling on dense drawings
-6. Public TradingView publication package
+2. Optional engine extraction into `pine/modules/`
+3. Additional killzone / news filters
+4. Performance profiling on dense drawings
+5. Public TradingView publication package
 
 ## Non-goals
 
