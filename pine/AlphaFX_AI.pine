@@ -1,22 +1,23 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v1.1.0]",
+    "AlphaFX AI [v1.2.0]",
     shorttitle = "AlphaFX AI",
     overlay = true,
     max_labels_count = 500,
-    max_lines_count = 350,
-    max_boxes_count = 300
+    max_lines_count = 400,
+    max_boxes_count = 400
 )
 
 //====================================================================
 // ALPHAFX AI
-// Version: 1.1.0
+// Version: 1.2.0
 // Status: Professional Release
 //
 // Product:
 // Commercial-quality Smart Money Concepts indicator for TradingView.
 // Original implementations. Confirmed-structure architecture.
 // Profile presets: Scalp / Intraday / Swing / Custom.
+// Quality filters: Premium/Discount, Killzone arming, Breaker blocks.
 //
 // Engine pipeline:
 // Inputs
@@ -26,9 +27,11 @@ indicator(
 // → BOS Engine
 // → CHoCH Engine
 // → Order Block Engine
+// → Breaker Block Engine
 // → Fair Value Gap Engine
 // → Liquidity Engine
 // → Session Engine
+// → Premium / Discount Engine
 // → Multi-Timeframe Engine
 // → Confidence Engine
 // → Risk Engine
@@ -57,9 +60,11 @@ string GROUP_TREND      = "Trend Engine"
 string GROUP_STRUCTURE  = "Market Structure"
 string GROUP_BOS        = "BOS / CHoCH"
 string GROUP_OB         = "Order Blocks"
+string GROUP_BREAKER    = "Breaker Blocks"
 string GROUP_FVG        = "Fair Value Gaps"
 string GROUP_LIQUIDITY  = "Liquidity"
 string GROUP_SESSIONS   = "Sessions"
+string GROUP_PD         = "Premium / Discount"
 string GROUP_MTF        = "Multi-Timeframe"
 string GROUP_CONFIDENCE = "Confidence"
 string GROUP_RISK       = "Risk"
@@ -202,6 +207,32 @@ bool keepMitigatedOrderBlocks = input.bool(
      "Keep Mitigated Order Blocks",
      tooltip = "When enabled, mitigated OBs stay visible with reduced opacity until invalidated.",
      group = GROUP_OB
+)
+
+
+//====================================================================
+// BREAKER BLOCK INPUTS
+//====================================================================
+
+bool showBreakerBlocks = input.bool(
+     true,
+     "Show Breaker Blocks",
+     tooltip = "Failed / invalidated order blocks flipped into opposite breaker zones.",
+     group = GROUP_BREAKER
+)
+
+int maxBreakerBlocks = input.int(
+     6,
+     "Max Active Breakers",
+     minval = 1,
+     maxval = 50,
+     group = GROUP_BREAKER
+)
+
+bool keepMitigatedBreakers = input.bool(
+     true,
+     "Keep Mitigated Breakers",
+     group = GROUP_BREAKER
 )
 
 
@@ -365,6 +396,69 @@ int maxSessionBoxes = input.int(
      minval = 3,
      maxval = 60,
      group = GROUP_SESSIONS
+)
+
+bool enableKillzoneArming = input.bool(
+     true,
+     "Enable Killzone Arming",
+     tooltip = "Arms confidence/risk quality filters during London Open and New York Open windows only.",
+     group = GROUP_SESSIONS
+)
+
+string londonKillzoneInput = input.session(
+     "0300-0500",
+     "London Killzone",
+     tooltip = "Interpreted in the Session Timezone.",
+     group = GROUP_SESSIONS
+)
+
+string newYorkKillzoneInput = input.session(
+     "0930-1130",
+     "New York Killzone",
+     tooltip = "Interpreted in the Session Timezone.",
+     group = GROUP_SESSIONS
+)
+
+bool requireKillzoneForRisk = input.bool(
+     true,
+     "Require Killzone for Risk Model",
+     tooltip = "When enabled, educational risk levels only appear while a killzone is armed.",
+     group = GROUP_SESSIONS
+)
+
+
+//====================================================================
+// PREMIUM / DISCOUNT INPUTS
+//====================================================================
+
+bool showPremiumDiscount = input.bool(
+     true,
+     "Show Equilibrium Line",
+     tooltip = "Equilibrium is the midpoint of the active confirmed swing high / low range.",
+     group = GROUP_PD
+)
+
+bool showPremiumDiscountBg = input.bool(
+     false,
+     "Shade Premium / Discount",
+     group = GROUP_PD
+)
+
+float equilibriumBandPct = input.float(
+     5.0,
+     "Equilibrium Band (%)",
+     minval = 1.0,
+     maxval = 20.0,
+     step = 0.5,
+     tooltip = "Percent of the active swing range treated as equilibrium (neither premium nor discount).",
+     group = GROUP_PD
+)
+
+bool requirePdAlignForRisk = input.bool(
+     true,
+     "Require PD Align for Risk",
+     tooltip = "Long risk model only in discount. Short risk model only in premium.",
+     group = GROUP_PD
 )
 
 
@@ -1113,6 +1207,59 @@ bool bearishObMitigatedEvent   = false
 bool bullishObInvalidatedEvent = false
 bool bearishObInvalidatedEvent = false
 
+// Breaker state (populated when OBs invalidate / fail).
+var array<box>   breakerBoxes       = array.new_box()
+var array<int>   breakerDirections  = array.new_int()
+var array<float> breakerTops        = array.new_float()
+var array<float> breakerBottoms     = array.new_float()
+var array<bool>  breakerMitigated   = array.new_bool()
+var array<int>   breakerCreatedBars = array.new_int()
+
+var string lastBreakerEvent = "—"
+
+bool bullishBreakerCreatedEvent   = false
+bool bearishBreakerCreatedEvent   = false
+bool bullishBreakerMitigatedEvent = false
+bool bearishBreakerMitigatedEvent = false
+bool bullishBreakerFilledEvent    = false
+bool bearishBreakerFilledEvent    = false
+
+createBreakerBlock(float zoneTop, float zoneBottom, int breakerDirection) =>
+    box breakerBox = na
+    if showBreakerBlocks
+        color breakerColor = breakerDirection == 1 ? bullishColor : bearishColor
+        breakerBox := box.new(
+             bar_index,
+             zoneTop,
+             bar_index,
+             zoneBottom,
+             xloc = xloc.bar_index,
+             border_color = color.new(breakerColor, 10),
+             border_width = 2,
+             bgcolor = color.new(breakerColor, 80),
+             extend = extend.none
+        )
+
+    array.push(breakerBoxes, breakerBox)
+    array.push(breakerDirections, breakerDirection)
+    array.push(breakerTops, zoneTop)
+    array.push(breakerBottoms, zoneBottom)
+    array.push(breakerMitigated, false)
+    array.push(breakerCreatedBars, bar_index)
+
+    while array.size(breakerBoxes) > maxBreakerBlocks
+        box oldBreaker = array.get(breakerBoxes, 0)
+        if not na(oldBreaker)
+            box.delete(oldBreaker)
+        array.remove(breakerBoxes, 0)
+        array.remove(breakerDirections, 0)
+        array.remove(breakerTops, 0)
+        array.remove(breakerBottoms, 0)
+        array.remove(breakerMitigated, 0)
+        array.remove(breakerCreatedBars, 0)
+
+    breakerDirection == 1 ? "Bullish Breaker" : "Bearish Breaker"
+
 // Returns bars-ago offset of the most recent opposing candle.
 // wantBearishCandle = true  -> last down-close candle (bullish OB source)
 // wantBearishCandle = false -> last up-close candle (bearish OB source)
@@ -1245,6 +1392,16 @@ if barstate.isconfirmed and array.size(obBoxes) > 0
                  isBullishOb ? close < zoneBottom : close > zoneTop
 
             if invalidated
+                // Failed OB flips into an opposite breaker block.
+                int breakerDirection = isBullishOb ? -1 : 1
+                string breakerName = createBreakerBlock(zoneTop, zoneBottom, breakerDirection)
+                lastBreakerEvent := breakerName
+
+                if breakerDirection == 1
+                    bullishBreakerCreatedEvent := true
+                else
+                    bearishBreakerCreatedEvent := true
+
                 if isBullishOb
                     bullishObInvalidatedEvent := true
                 else
@@ -1283,6 +1440,76 @@ if barstate.isconfirmed and array.size(obBoxes) > 0
                         array.remove(obBottoms, i)
                         array.remove(obMitigated, i)
                         array.remove(obCreatedBars, i)
+
+
+//====================================================================
+// BREAKER BLOCK ENGINE
+//====================================================================
+//
+// A breaker is created when an order block fails (confirmed close
+// through its far side). Direction flips:
+// - Failed bullish OB  -> Bearish Breaker
+// - Failed bearish OB  -> Bullish Breaker
+//
+// Lifecycle mirrors OBs: mitigate on revisit, fill on close-through.
+//====================================================================
+
+if barstate.isconfirmed and array.size(breakerBoxes) > 0
+    for i = array.size(breakerBoxes) - 1 to 0
+        box activeBreaker = array.get(breakerBoxes, i)
+        int breakerDir = array.get(breakerDirections, i)
+        float breakerTop = array.get(breakerTops, i)
+        float breakerBottom = array.get(breakerBottoms, i)
+        bool breakerAlreadyMitigated = array.get(breakerMitigated, i)
+        int breakerCreatedBar = array.get(breakerCreatedBars, i)
+
+        if not na(activeBreaker)
+            box.set_right(activeBreaker, bar_index)
+
+        if bar_index > breakerCreatedBar
+            bool isBullishBreaker = breakerDir == 1
+            bool breakerFilled =
+                 isBullishBreaker ? close < breakerBottom : close > breakerTop
+
+            if breakerFilled
+                if isBullishBreaker
+                    bullishBreakerFilledEvent := true
+                else
+                    bearishBreakerFilledEvent := true
+
+                if not na(activeBreaker)
+                    box.delete(activeBreaker)
+                array.remove(breakerBoxes, i)
+                array.remove(breakerDirections, i)
+                array.remove(breakerTops, i)
+                array.remove(breakerBottoms, i)
+                array.remove(breakerMitigated, i)
+                array.remove(breakerCreatedBars, i)
+            else
+                bool enteredBreaker = high >= breakerBottom and low <= breakerTop
+
+                if not breakerAlreadyMitigated and enteredBreaker
+                    array.set(breakerMitigated, i, true)
+
+                    if isBullishBreaker
+                        bullishBreakerMitigatedEvent := true
+                    else
+                        bearishBreakerMitigatedEvent := true
+
+                    if keepMitigatedBreakers
+                        if not na(activeBreaker)
+                            color mutedBreaker = isBullishBreaker ? bullishColor : bearishColor
+                            box.set_bgcolor(activeBreaker, color.new(mutedBreaker, 92))
+                            box.set_border_color(activeBreaker, color.new(mutedBreaker, 45))
+                    else
+                        if not na(activeBreaker)
+                            box.delete(activeBreaker)
+                        array.remove(breakerBoxes, i)
+                        array.remove(breakerDirections, i)
+                        array.remove(breakerTops, i)
+                        array.remove(breakerBottoms, i)
+                        array.remove(breakerMitigated, i)
+                        array.remove(breakerCreatedBars, i)
 
 
 //====================================================================
@@ -1821,6 +2048,26 @@ bool inLondonSession =
 bool inNewYorkSession =
      showNewYorkSession and
      not na(time(timeframe.period, newYorkSessionInput, resolvedSessionTimezone))
+
+bool inLondonKillzone =
+     enableKillzoneArming and
+     not na(time(timeframe.period, londonKillzoneInput, resolvedSessionTimezone))
+
+bool inNewYorkKillzone =
+     enableKillzoneArming and
+     not na(time(timeframe.period, newYorkKillzoneInput, resolvedSessionTimezone))
+
+bool killzoneArmed =
+     enableKillzoneArming and
+     (inLondonKillzone or inNewYorkKillzone)
+
+string killzoneText =
+     not enableKillzoneArming ? "OFF" :
+     killzoneArmed ? (inLondonKillzone and inNewYorkKillzone ? "ARMED LON/NY" : inLondonKillzone ? "ARMED LONDON" : "ARMED NY") :
+     "IDLE"
+
+color killzoneColor =
+     killzoneArmed ? bullishColor : neutralColor
 
 string currentSessionText =
      inAsianSession and inLondonSession and inNewYorkSession ? "ALL" :
@@ -2376,21 +2623,97 @@ float alignmentScore =
 
 
 //====================================================================
+// PREMIUM / DISCOUNT ENGINE
+//====================================================================
+//
+// Uses the active confirmed swing range:
+// - Equilibrium = midpoint
+// - Premium = above equilibrium band
+// - Discount = below equilibrium band
+//
+// Non-repainting: swing extremes are confirmed pivots only.
+//====================================================================
+
+var line equilibriumLine = na
+
+bool pdRangeReady =
+     not na(activeSwingHigh) and
+     not na(activeSwingLow) and
+     activeSwingHigh > activeSwingLow
+
+float equilibriumLevel =
+     pdRangeReady ? (activeSwingHigh + activeSwingLow) * 0.5 : na
+
+float pdRangeSize =
+     pdRangeReady ? activeSwingHigh - activeSwingLow : na
+
+float equilibriumBand =
+     pdRangeReady ? pdRangeSize * (equilibriumBandPct / 100.0) : na
+
+bool inEquilibrium =
+     pdRangeReady and
+     math.abs(close - equilibriumLevel) <= equilibriumBand
+
+bool inPremium =
+     pdRangeReady and
+     not inEquilibrium and
+     close > equilibriumLevel
+
+bool inDiscount =
+     pdRangeReady and
+     not inEquilibrium and
+     close < equilibriumLevel
+
+string pdZoneText =
+     not pdRangeReady ? "—" :
+     inEquilibrium ? "EQUILIBRIUM" :
+     inPremium ? "PREMIUM" :
+     inDiscount ? "DISCOUNT" :
+     "—"
+
+color pdZoneColor =
+     inPremium ? bearishColor :
+     inDiscount ? bullishColor :
+     neutralColor
+
+if showPremiumDiscount and pdRangeReady
+    if na(equilibriumLine)
+        equilibriumLine := line.new(
+             bar_index,
+             equilibriumLevel,
+             bar_index + 1,
+             equilibriumLevel,
+             xloc = xloc.bar_index,
+             extend = extend.right,
+             style = line.style_dotted,
+             color = color.new(neutralColor, 20),
+             width = 1
+        )
+    else
+        line.set_y1(equilibriumLine, equilibriumLevel)
+        line.set_y2(equilibriumLine, equilibriumLevel)
+        line.set_x2(equilibriumLine, bar_index)
+else
+    if not na(equilibriumLine)
+        line.delete(equilibriumLine)
+        equilibriumLine := na
+
+bgcolor(
+     showPremiumDiscountBg and inPremium ? color.new(bearishColor, 94) :
+     showPremiumDiscountBg and inDiscount ? color.new(bullishColor, 94) :
+     na,
+     title = "Premium / Discount Shade"
+)
+
+
+//====================================================================
 // CONFIDENCE ENGINE
 //====================================================================
 //
 // Confluence score across confirmed engines.
 //
-// Weight map (per side, max 100 before conflict penalty):
-// - Chart EMA trend                 18
-// - Structural direction (BOS/CHoCH) 14
-// - HH/HL or LH/LL structure pair   10
-// - MTF trend alignment             18
-// - Latest matching structure event 10
-// - Active matching Order Block     10
-// - Active matching FVG              8
-// - Matching liquidity sweep         7
-// - London / New York session        5
+// Base weights plus quality bonuses (PD, breaker, killzone arming).
+// Final raw score is clamped to 100 before MTF conflict penalty.
 //
 // NOT a win probability. It only measures agreement quality.
 // Uses already-confirmed engine state only.
@@ -2406,6 +2729,17 @@ if array.size(obDirections) > 0
             hasActiveBullishOb := true
         if obDir == -1
             hasActiveBearishOb := true
+
+bool hasActiveBullishBreaker = false
+bool hasActiveBearishBreaker = false
+
+if array.size(breakerDirections) > 0
+    for i = 0 to array.size(breakerDirections) - 1
+        int brDir = array.get(breakerDirections, i)
+        if brDir == 1
+            hasActiveBullishBreaker := true
+        if brDir == -1
+            hasActiveBearishBreaker := true
 
 bool hasActiveBullishFvg = false
 bool hasActiveBearishFvg = false
@@ -2428,8 +2762,6 @@ bool bearishStructureEvent =
 
 bool bullishLiquiditySweep = lastLiquidityEvent == "EQL Sweep"
 bool bearishLiquiditySweep = lastLiquidityEvent == "EQH Sweep"
-
-bool inKillzoneSession = inLondonSession or inNewYorkSession
 
 int bullishConfidencePoints = 0
 int bearishConfidencePoints = 0
@@ -2465,6 +2797,11 @@ if enableConfidence
     if hasActiveBearishOb
         bearishConfidencePoints += 10
 
+    if hasActiveBullishBreaker
+        bullishConfidencePoints += 6
+    if hasActiveBearishBreaker
+        bearishConfidencePoints += 6
+
     if hasActiveBullishFvg
         bullishConfidencePoints += 8
     if hasActiveBearishFvg
@@ -2475,15 +2812,22 @@ if enableConfidence
     if bearishLiquiditySweep
         bearishConfidencePoints += 7
 
-    if inKillzoneSession
+    // Premium / Discount alignment quality bonus.
+    if inDiscount
+        bullishConfidencePoints += 6
+    if inPremium
+        bearishConfidencePoints += 6
+
+    // Killzone arming replaces broad session bonus.
+    if killzoneArmed
         if trendState == 1
-            bullishConfidencePoints += 5
+            bullishConfidencePoints += 8
         else if trendState == -1
-            bearishConfidencePoints += 5
+            bearishConfidencePoints += 8
         else if structuralDirection == 1
-            bullishConfidencePoints += 5
+            bullishConfidencePoints += 8
         else if structuralDirection == -1
-            bearishConfidencePoints += 5
+            bearishConfidencePoints += 8
 
 int confidenceDirection =
      not enableConfidence ? 0 :
@@ -2493,9 +2837,12 @@ int confidenceDirection =
 
 float confidenceScoreRaw =
      not enableConfidence ? 0.0 :
-     confidenceDirection == 1 ? bullishConfidencePoints :
-     confidenceDirection == -1 ? bearishConfidencePoints :
-     math.max(bullishConfidencePoints, bearishConfidencePoints)
+     math.min(
+         100.0,
+         confidenceDirection == 1 ? bullishConfidencePoints :
+         confidenceDirection == -1 ? bearishConfidencePoints :
+         math.max(bullishConfidencePoints, bearishConfidencePoints)
+     )
 
 float confidenceScore =
      mtfTrendConflict
@@ -2593,11 +2940,25 @@ if enableRisk and barstate.isconfirmed
          confidenceDirection != 0 and
          confidenceScore >= minConfidenceForRisk
 
+    bool killzoneAllowsRisk =
+         not requireKillzoneForRisk or
+         not enableKillzoneArming or
+         killzoneArmed
+
+    bool pdAllowsRisk =
+         not requirePdAlignForRisk or
+         (
+             confidenceDirection == 1 and inDiscount
+         ) or
+         (
+             confidenceDirection == -1 and inPremium
+         )
+
     bool swingsReady =
          not na(activeSwingHigh) and
          not na(activeSwingLow)
 
-    if confidenceAllowsRisk and swingsReady
+    if confidenceAllowsRisk and killzoneAllowsRisk and pdAllowsRisk and swingsReady
         int modelDirection = confidenceDirection
         float modelEntry = close
         float atrBuffer = riskAtr * riskAtrBuffer
@@ -2827,7 +3188,7 @@ color lastSessionEventColor =
 var table dashboard = table.new(
      position.top_right,
      2,
-     19,
+     22,
      bgcolor = color.new(color.black, 15),
      frame_color = color.new(color.white, 70),
      frame_width = 1,
@@ -2857,7 +3218,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v1.1",
+             "v1.2",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small
@@ -2964,14 +3325,14 @@ if barstate.islast
         )
 
         //------------------------------------------------------------
-        // SESSION
+        // ZONE (PREMIUM / DISCOUNT)
         //------------------------------------------------------------
 
         table.cell(
              dashboard,
              0,
              6,
-             "Session",
+             "Zone",
              text_color = color.silver
         )
 
@@ -2979,8 +3340,48 @@ if barstate.islast
              dashboard,
              1,
              6,
+             pdZoneText,
+             text_color = pdZoneColor
+        )
+
+        //------------------------------------------------------------
+        // SESSION
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             7,
+             "Session",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             7,
              currentSessionText,
              text_color = currentSessionColor
+        )
+
+        //------------------------------------------------------------
+        // KILLZONE
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             8,
+             "Killzone",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             8,
+             killzoneText,
+             text_color = killzoneColor
         )
 
         //------------------------------------------------------------
@@ -2990,7 +3391,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             7,
+             9,
              "Last Event",
              text_color = color.silver
         )
@@ -2998,7 +3399,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             7,
+             9,
              lastEvent,
              text_color = lastEventColor
         )
@@ -3010,7 +3411,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             8,
+             10,
              "Last OB",
              text_color = color.silver
         )
@@ -3018,9 +3419,32 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             8,
+             10,
              lastObEvent,
              text_color = lastObColor
+        )
+
+        //------------------------------------------------------------
+        // LAST BREAKER
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             11,
+             "Last BR",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             11,
+             lastBreakerEvent,
+             text_color =
+                 str.contains(lastBreakerEvent, "Bullish") ? bullishColor :
+                 str.contains(lastBreakerEvent, "Bearish") ? bearishColor :
+                 neutralColor
         )
 
         //------------------------------------------------------------
@@ -3030,7 +3454,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             9,
+             12,
              "Last FVG",
              text_color = color.silver
         )
@@ -3038,7 +3462,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             9,
+             12,
              lastFvgEvent,
              text_color = lastFvgColor
         )
@@ -3050,7 +3474,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             10,
+             13,
              "Last Liq",
              text_color = color.silver
         )
@@ -3058,7 +3482,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             10,
+             13,
              lastLiquidityEvent,
              text_color = lastLiquidityColor
         )
@@ -3070,7 +3494,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             11,
+             14,
              "Last Sess",
              text_color = color.silver
         )
@@ -3078,7 +3502,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             11,
+             14,
              lastSessionEvent,
              text_color = lastSessionEventColor
         )
@@ -3090,7 +3514,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             12,
+             15,
              "Last High",
              text_color = color.silver
         )
@@ -3098,7 +3522,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             12,
+             15,
              lastHighType,
              text_color =
                  lastHighType == "HH"
@@ -3115,7 +3539,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             13,
+             16,
              "Last Low",
              text_color = color.silver
         )
@@ -3123,7 +3547,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             13,
+             16,
              lastLowType,
              text_color =
                  lastLowType == "HL"
@@ -3140,7 +3564,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             14,
+             17,
              "Alignment",
              text_color = color.silver
         )
@@ -3148,7 +3572,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             14,
+             17,
              str.tostring(
                  alignmentScore,
                  "#"
@@ -3163,7 +3587,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             15,
+             18,
              "Confidence",
              text_color = color.silver
         )
@@ -3171,7 +3595,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             15,
+             18,
              enableConfidence
                  ? confidenceText + " " + confidenceDirectionText
                  : "OFF",
@@ -3186,7 +3610,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             16,
+             19,
              "Risk",
              text_color = color.silver
         )
@@ -3194,7 +3618,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             16,
+             19,
              riskText,
              text_color = riskColor,
              bgcolor = color.new(riskColor, 88)
@@ -3207,7 +3631,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             17,
+             20,
              "Risk Size",
              text_color = color.silver
         )
@@ -3215,7 +3639,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             17,
+             20,
              riskQtyText,
              text_color = riskColor
         )
@@ -3227,7 +3651,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             18,
+             21,
              "Bias",
              text_color = color.silver
         )
@@ -3235,7 +3659,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             18,
+             21,
              marketBias,
              text_color = marketBiasColor,
              bgcolor = color.new(
@@ -3251,7 +3675,7 @@ if barstate.islast
              0,
              0,
              1,
-             18
+             21
         )
 
 
@@ -3483,4 +3907,34 @@ alertcondition(
      riskModelInvalidEvent,
      title = "Risk Model Invalid",
      message = "AlphaFX AI: Risk model invalidated or unavailable"
+)
+
+alertcondition(
+     bullishBreakerCreatedEvent,
+     title = "Bullish Breaker",
+     message = "AlphaFX AI: Bullish Breaker created from failed bearish OB"
+)
+
+alertcondition(
+     bearishBreakerCreatedEvent,
+     title = "Bearish Breaker",
+     message = "AlphaFX AI: Bearish Breaker created from failed bullish OB"
+)
+
+alertcondition(
+     bullishBreakerMitigatedEvent,
+     title = "Bullish Breaker Mitigated",
+     message = "AlphaFX AI: Bullish Breaker mitigated"
+)
+
+alertcondition(
+     bearishBreakerMitigatedEvent,
+     title = "Bearish Breaker Mitigated",
+     message = "AlphaFX AI: Bearish Breaker mitigated"
+)
+
+alertcondition(
+     killzoneArmed and not killzoneArmed[1],
+     title = "Killzone Armed",
+     message = "AlphaFX AI: Killzone armed"
 )
