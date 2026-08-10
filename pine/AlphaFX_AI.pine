@@ -1,6 +1,6 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v0.9.0-alpha]",
+    "AlphaFX AI [v1.0.0-rc]",
     shorttitle = "AlphaFX AI",
     overlay = true,
     max_labels_count = 500,
@@ -10,65 +10,40 @@ indicator(
 
 //====================================================================
 // ALPHAFX AI
-// Version: 0.9.0-alpha
+// Version: 1.0.0-rc
+// Status: Professional Release Candidate
 //
-// Phase 1:
-// - EMA Trend Engine
-// - Confirmed Swing Detection
-// - HH / HL / LH / LL Classification
-// - Market Bias
-// - Dashboard
+// Product:
+// Commercial-quality Smart Money Concepts indicator for TradingView.
+// Original implementations. Confirmed-structure architecture.
 //
-// Phase 2:
-// - BOS Engine
-// - CHoCH Engine
-// - Structure Break Lines
-// - Structure Break Alerts
-// - Last Event Dashboard Row
+// Engine pipeline:
+// Inputs
+// → Trend Engine
+// → Swing Engine
+// → Structure Engine
+// → BOS Engine
+// → CHoCH Engine
+// → Order Block Engine
+// → Fair Value Gap Engine
+// → Liquidity Engine
+// → Session Engine
+// → Multi-Timeframe Engine
+// → Confidence Engine
+// → Risk Engine
+// → Dashboard
+// → Alerts
 //
-// Phase 3:
-// - Order Block Engine
-// - Mitigation / Invalidation
-// - OB Dashboard + Alerts
-//
-// Phase 4:
-// - Fair Value Gap Engine
-// - FVG Mitigation / Fill
-// - FVG Dashboard + Alerts
-//
-// Phase 5:
-// - Liquidity Engine (EQH / EQL)
-// - Liquidity Sweep Detection
-// - Liquidity Dashboard + Alerts
-//
-// Phase 6:
-// - Session Engine (Asian / London / New York)
-// - Confirmed Session Ranges
-// - Session High / Low Breaks
-//
-// Phase 7:
-// - Multi-Timeframe Engine
-// - Confirmed HTF Trend Alignment
-//
-// Phase 8:
-// - Confidence Engine
-// - Confluence Scoring + Grades
-//
-// Phase 9:
-// - Risk Engine
-// - Structure-based SL / TP / RR
-//
-// Design:
-// - Confirmed structure only
-// - No future-looking data
-// - Breaks require closed-bar confirmation
-// - OBs are derived only from confirmed BOS / CHoCH
-// - FVGs use confirmed 3-candle imbalances only
-// - Liquidity uses confirmed swing equals only
-// - Session highs / lows lock when the session ends
+// Non-repainting policy:
+// - Confirmed pivots only
+// - Structure breaks require closed-bar confirmation
 // - HTF data uses completed higher-timeframe bars only
-// - Confidence measures confluence, not win probability
-// - Risk levels use confirmed swings + ATR buffer only
+// - No intentional future-looking logic
+//
+// Important:
+// - Confidence is confluence quality, not win probability
+// - Risk levels are educational guidance, not trade execution
+// - This script does not place orders
 //====================================================================
 
 
@@ -2755,7 +2730,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v0.9",
+             "v1.0-rc",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small
