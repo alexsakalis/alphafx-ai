@@ -1,0 +1,647 @@
+//@version=6
+indicator(
+    "AlphaFX AI [v0.1.0-alpha]",
+    shorttitle = "AlphaFX AI",
+    overlay = true,
+    max_labels_count = 500
+)
+
+//====================================================================
+// ALPHAFX AI
+// Version: 0.1.0-alpha
+//
+// Phase 1:
+// - EMA Trend Engine
+// - Confirmed Swing Detection
+// - HH / HL / LH / LL Classification
+// - Market Bias
+// - Dashboard
+//
+// Design:
+// - Confirmed structure only
+// - No future-looking data
+// - Foundation for BOS / CHoCH / SMC modules
+//====================================================================
+
+
+//====================================================================
+// INPUT GROUPS
+//====================================================================
+
+string GROUP_TREND     = "Trend Engine"
+string GROUP_STRUCTURE = "Market Structure"
+string GROUP_VISUALS   = "Visuals"
+string GROUP_DASHBOARD = "Dashboard"
+
+
+//====================================================================
+// TREND INPUTS
+//====================================================================
+
+bool showEMAs = input.bool(
+     true,
+     "Show EMAs",
+     group = GROUP_TREND
+)
+
+int fastEmaLength = input.int(
+     20,
+     "Fast EMA",
+     minval = 1,
+     group = GROUP_TREND
+)
+
+int mediumEmaLength = input.int(
+     50,
+     "Medium EMA",
+     minval = 1,
+     group = GROUP_TREND
+)
+
+int slowEmaLength = input.int(
+     200,
+     "Slow EMA",
+     minval = 1,
+     group = GROUP_TREND
+)
+
+bool usePriceFilter = input.bool(
+     true,
+     "Require Price Above/Below Slow EMA",
+     tooltip = "Bullish trend requires price above the slow EMA. Bearish trend requires price below it.",
+     group = GROUP_TREND
+)
+
+
+//====================================================================
+// STRUCTURE INPUTS
+//====================================================================
+
+int pivotLength = input.int(
+     5,
+     "Pivot Length",
+     minval = 1,
+     maxval = 50,
+     tooltip = "Higher values detect larger structural swings and reduce noise.",
+     group = GROUP_STRUCTURE
+)
+
+bool showStructureLabels = input.bool(
+     true,
+     "Show HH / HL / LH / LL",
+     group = GROUP_STRUCTURE
+)
+
+
+//====================================================================
+// VISUAL INPUTS
+//====================================================================
+
+bool showBackground = input.bool(
+     false,
+     "Trend Background",
+     group = GROUP_VISUALS
+)
+
+color bullishColor = input.color(
+     color.rgb(0, 190, 120),
+     "Bullish Color",
+     group = GROUP_VISUALS
+)
+
+color bearishColor = input.color(
+     color.rgb(230, 70, 70),
+     "Bearish Color",
+     group = GROUP_VISUALS
+)
+
+color neutralColor = input.color(
+     color.rgb(140, 140, 140),
+     "Neutral Color",
+     group = GROUP_VISUALS
+)
+
+
+//====================================================================
+// DASHBOARD INPUTS
+//====================================================================
+
+bool showDashboard = input.bool(
+     true,
+     "Show Dashboard",
+     group = GROUP_DASHBOARD
+)
+
+
+//====================================================================
+// EMA TREND ENGINE
+//====================================================================
+
+float emaFast   = ta.ema(close, fastEmaLength)
+float emaMedium = ta.ema(close, mediumEmaLength)
+float emaSlow   = ta.ema(close, slowEmaLength)
+
+bool emaBullish =
+     emaFast > emaMedium and
+     emaMedium > emaSlow
+
+bool emaBearish =
+     emaFast < emaMedium and
+     emaMedium < emaSlow
+
+bool priceBullish =
+     not usePriceFilter or
+     close > emaSlow
+
+bool priceBearish =
+     not usePriceFilter or
+     close < emaSlow
+
+bool bullishTrend =
+     emaBullish and
+     priceBullish
+
+bool bearishTrend =
+     emaBearish and
+     priceBearish
+
+
+//====================================================================
+// TREND STATE
+//====================================================================
+//
+//  1 = Bullish
+//  0 = Neutral
+// -1 = Bearish
+//====================================================================
+
+int trendState =
+     bullishTrend ? 1 :
+     bearishTrend ? -1 :
+     0
+
+string trendText =
+     trendState == 1 ? "BULLISH" :
+     trendState == -1 ? "BEARISH" :
+     "NEUTRAL"
+
+color trendColor =
+     trendState == 1 ? bullishColor :
+     trendState == -1 ? bearishColor :
+     neutralColor
+
+
+//====================================================================
+// EMA PLOTS
+//====================================================================
+
+plot(
+     showEMAs ? emaFast : na,
+     title = "Fast EMA",
+     linewidth = 1,
+     color = color.new(bullishColor, 0)
+)
+
+plot(
+     showEMAs ? emaMedium : na,
+     title = "Medium EMA",
+     linewidth = 2,
+     color = color.new(color.orange, 0)
+)
+
+plot(
+     showEMAs ? emaSlow : na,
+     title = "Slow EMA",
+     linewidth = 2,
+     color = color.new(bearishColor, 0)
+)
+
+
+//====================================================================
+// OPTIONAL TREND BACKGROUND
+//====================================================================
+
+color backgroundColor =
+     trendState == 1 ? color.new(bullishColor, 92) :
+     trendState == -1 ? color.new(bearishColor, 92) :
+     color.new(neutralColor, 96)
+
+bgcolor(
+     showBackground ? backgroundColor : na,
+     title = "Trend Background"
+)
+
+
+//====================================================================
+// SWING DETECTION
+//====================================================================
+//
+// TradingView only confirms a pivot after `pivotLength` bars have
+// appeared to its right.
+//
+// This introduces intentional confirmation delay while avoiding
+// future-looking structure signals.
+//====================================================================
+
+float pivotHigh = ta.pivothigh(
+     high,
+     pivotLength,
+     pivotLength
+)
+
+float pivotLow = ta.pivotlow(
+     low,
+     pivotLength,
+     pivotLength
+)
+
+bool newPivotHigh = not na(pivotHigh)
+bool newPivotLow  = not na(pivotLow)
+
+
+//====================================================================
+// PREVIOUS CONFIRMED SWING STORAGE
+//====================================================================
+
+var float previousSwingHigh = na
+var float previousSwingLow  = na
+
+var float currentSwingHigh = na
+var float currentSwingLow  = na
+
+var string lastHighType = "—"
+var string lastLowType  = "—"
+
+var string lastStructureEvent = "Waiting"
+
+
+//====================================================================
+// HIGH STRUCTURE CLASSIFICATION
+//====================================================================
+
+if newPivotHigh
+
+    currentSwingHigh := pivotHigh
+
+    string highType =
+         na(previousSwingHigh) ? "H" :
+         currentSwingHigh > previousSwingHigh ? "HH" :
+         currentSwingHigh < previousSwingHigh ? "LH" :
+         "EH"
+
+    lastHighType := highType
+    lastStructureEvent := highType
+
+    if showStructureLabels
+
+        label.new(
+             bar_index - pivotLength,
+             pivotHigh,
+             highType,
+             style = label.style_label_down,
+             color =
+                 highType == "HH"
+                     ? bullishColor
+                     : highType == "LH"
+                     ? bearishColor
+                     : neutralColor,
+             textcolor = color.white,
+             size = size.tiny
+        )
+
+    previousSwingHigh := currentSwingHigh
+
+
+//====================================================================
+// LOW STRUCTURE CLASSIFICATION
+//====================================================================
+
+if newPivotLow
+
+    currentSwingLow := pivotLow
+
+    string lowType =
+         na(previousSwingLow) ? "L" :
+         currentSwingLow > previousSwingLow ? "HL" :
+         currentSwingLow < previousSwingLow ? "LL" :
+         "EL"
+
+    lastLowType := lowType
+    lastStructureEvent := lowType
+
+    if showStructureLabels
+
+        label.new(
+             bar_index - pivotLength,
+             pivotLow,
+             lowType,
+             style = label.style_label_up,
+             color =
+                 lowType == "HL"
+                     ? bullishColor
+                     : lowType == "LL"
+                     ? bearishColor
+                     : neutralColor,
+             textcolor = color.white,
+             size = size.tiny
+        )
+
+    previousSwingLow := currentSwingLow
+
+
+//====================================================================
+// STRUCTURE BIAS
+//====================================================================
+//
+// Bullish structure:
+// HH + HL
+//
+// Bearish structure:
+// LH + LL
+//
+// Anything else is treated as Mixed.
+//====================================================================
+
+bool bullishStructure =
+     lastHighType == "HH" and
+     lastLowType == "HL"
+
+bool bearishStructure =
+     lastHighType == "LH" and
+     lastLowType == "LL"
+
+string structureText =
+     bullishStructure ? "BULLISH" :
+     bearishStructure ? "BEARISH" :
+     "MIXED"
+
+color structureColor =
+     bullishStructure ? bullishColor :
+     bearishStructure ? bearishColor :
+     neutralColor
+
+
+//====================================================================
+// CORE BIAS ENGINE
+//====================================================================
+//
+// This is intentionally simple for v0.1.
+//
+// Later phases will add:
+// - BOS
+// - CHoCH
+// - Liquidity
+// - FVG
+// - Order Blocks
+// - Higher timeframe confirmation
+//====================================================================
+
+int bullishPoints = 0
+int bearishPoints = 0
+
+if bullishTrend
+    bullishPoints += 2
+
+if bearishTrend
+    bearishPoints += 2
+
+if bullishStructure
+    bullishPoints += 2
+
+if bearishStructure
+    bearishPoints += 2
+
+if close > emaFast
+    bullishPoints += 1
+
+if close < emaFast
+    bearishPoints += 1
+
+
+//====================================================================
+// MARKET BIAS
+//====================================================================
+
+string marketBias =
+     bullishPoints > bearishPoints ? "BUY BIAS" :
+     bearishPoints > bullishPoints ? "SELL BIAS" :
+     "NEUTRAL"
+
+color marketBiasColor =
+     bullishPoints > bearishPoints ? bullishColor :
+     bearishPoints > bullishPoints ? bearishColor :
+     neutralColor
+
+
+//====================================================================
+// ALIGNMENT SCORE
+//====================================================================
+//
+// NOT a trade probability.
+//
+// This measures how strongly our current Phase 1 conditions agree.
+//====================================================================
+
+int maximumPoints = 5
+
+int dominantPoints =
+     math.max(
+         bullishPoints,
+         bearishPoints
+     )
+
+float alignmentScore =
+     maximumPoints > 0
+         ? dominantPoints / maximumPoints * 100.0
+         : 0.0
+
+
+//====================================================================
+// DASHBOARD
+//====================================================================
+
+var table dashboard = table.new(
+     position.top_right,
+     2,
+     7,
+     bgcolor = color.new(color.black, 15),
+     frame_color = color.new(color.white, 70),
+     frame_width = 1,
+     border_color = color.new(color.white, 90),
+     border_width = 1
+)
+
+if barstate.islast
+
+    if showDashboard
+
+        //------------------------------------------------------------
+        // HEADER
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             0,
+             "ALPHAFX AI",
+             text_color = color.white,
+             bgcolor = color.new(color.black, 0),
+             text_size = size.small
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             0,
+             "v0.1",
+             text_color = color.silver,
+             bgcolor = color.new(color.black, 0),
+             text_size = size.small
+        )
+
+        //------------------------------------------------------------
+        // TREND
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             1,
+             "Trend",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             1,
+             trendText,
+             text_color = trendColor
+        )
+
+        //------------------------------------------------------------
+        // STRUCTURE
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             2,
+             "Structure",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             2,
+             structureText,
+             text_color = structureColor
+        )
+
+        //------------------------------------------------------------
+        // LAST HIGH
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             3,
+             "Last High",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             3,
+             lastHighType,
+             text_color =
+                 lastHighType == "HH"
+                     ? bullishColor
+                     : lastHighType == "LH"
+                     ? bearishColor
+                     : neutralColor
+        )
+
+        //------------------------------------------------------------
+        // LAST LOW
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             4,
+             "Last Low",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             4,
+             lastLowType,
+             text_color =
+                 lastLowType == "HL"
+                     ? bullishColor
+                     : lastLowType == "LL"
+                     ? bearishColor
+                     : neutralColor
+        )
+
+        //------------------------------------------------------------
+        // ALIGNMENT
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             5,
+             "Alignment",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             5,
+             str.tostring(
+                 alignmentScore,
+                 "#"
+             ) + "%",
+             text_color = marketBiasColor
+        )
+
+        //------------------------------------------------------------
+        // BIAS
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             6,
+             "Bias",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             6,
+             marketBias,
+             text_color = marketBiasColor,
+             bgcolor = color.new(
+                 marketBiasColor,
+                 85
+             )
+        )
+
+    else
+
+        table.clear(
+             dashboard,
+             0,
+             0,
+             1,
+             6
+        )
