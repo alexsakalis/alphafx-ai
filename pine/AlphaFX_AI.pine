@@ -1,16 +1,16 @@
 //@version=6
 indicator(
-    "AlphaFX AI [v0.4.0-alpha]",
+    "AlphaFX AI [v0.5.0-alpha]",
     shorttitle = "AlphaFX AI",
     overlay = true,
     max_labels_count = 500,
-    max_lines_count = 100,
+    max_lines_count = 200,
     max_boxes_count = 200
 )
 
 //====================================================================
 // ALPHAFX AI
-// Version: 0.4.0-alpha
+// Version: 0.5.0-alpha
 //
 // Phase 1:
 // - EMA Trend Engine
@@ -36,13 +36,19 @@ indicator(
 // - FVG Mitigation / Fill
 // - FVG Dashboard + Alerts
 //
+// Phase 5:
+// - Liquidity Engine (EQH / EQL)
+// - Liquidity Sweep Detection
+// - Liquidity Dashboard + Alerts
+//
 // Design:
 // - Confirmed structure only
 // - No future-looking data
 // - Breaks require closed-bar confirmation
 // - OBs are derived only from confirmed BOS / CHoCH
 // - FVGs use confirmed 3-candle imbalances only
-// - Foundation for Liquidity / Sessions modules
+// - Liquidity uses confirmed swing equals only
+// - Foundation for Sessions / MTF modules
 //====================================================================
 
 
@@ -55,6 +61,7 @@ string GROUP_STRUCTURE = "Market Structure"
 string GROUP_BOS       = "BOS / CHoCH"
 string GROUP_OB        = "Order Blocks"
 string GROUP_FVG       = "Fair Value Gaps"
+string GROUP_LIQUIDITY = "Liquidity"
 string GROUP_VISUALS   = "Visuals"
 string GROUP_DASHBOARD = "Dashboard"
 
@@ -217,6 +224,56 @@ bool fvgRequireStructureAlign = input.bool(
      "Require Structure Alignment",
      tooltip = "When enabled, bullish FVGs require bullish/unset structure direction and bearish FVGs require bearish/unset structure direction.",
      group = GROUP_FVG
+)
+
+
+//====================================================================
+// LIQUIDITY INPUTS
+//====================================================================
+
+bool showLiquidity = input.bool(
+     true,
+     "Show Liquidity Levels",
+     tooltip = "Draw equal high (EQH) and equal low (EQL) liquidity pools.",
+     group = GROUP_LIQUIDITY
+)
+
+float liqToleranceAtrMult = input.float(
+     0.15,
+     "Equal Level Tolerance (ATR Mult)",
+     minval = 0.01,
+     step = 0.01,
+     tooltip = "Two confirmed swings form a liquidity pool when their distance is within ATR(14) * this value.",
+     group = GROUP_LIQUIDITY
+)
+
+int maxLiquidityLevels = input.int(
+     8,
+     "Max Active Liquidity Levels",
+     minval = 1,
+     maxval = 50,
+     group = GROUP_LIQUIDITY
+)
+
+int liqSwingHistory = input.int(
+     12,
+     "Swing History Depth",
+     minval = 2,
+     maxval = 50,
+     tooltip = "How many confirmed swings to compare when searching for equal highs / lows.",
+     group = GROUP_LIQUIDITY
+)
+
+bool showLiquidityLabels = input.bool(
+     true,
+     "Show EQH / EQL Labels",
+     group = GROUP_LIQUIDITY
+)
+
+bool showSweepLabels = input.bool(
+     true,
+     "Show Sweep Labels",
+     group = GROUP_LIQUIDITY
 )
 
 
@@ -1119,11 +1176,308 @@ if barstate.isconfirmed and array.size(fvgBoxes) > 0
 
 
 //====================================================================
+// LIQUIDITY ENGINE
+//====================================================================
+//
+// Equal High (EQH / buy-side liquidity):
+// Two confirmed swing highs within ATR tolerance.
+//
+// Equal Low (EQL / sell-side liquidity):
+// Two confirmed swing lows within ATR tolerance.
+//
+// Sweep (confirmed bar only):
+// - EQH Sweep: high > level and close < level
+// - EQL Sweep: low < level and close > level
+//
+// Each pool may be swept only once.
+//
+// Non-repainting:
+// Pools use confirmed pivots. Sweeps require barstate.isconfirmed
+// and a reclaim close back inside the level.
+//====================================================================
+
+var array<float> liqSwingHighPrices = array.new_float()
+var array<int>   liqSwingHighBars   = array.new_int()
+var array<float> liqSwingLowPrices  = array.new_float()
+var array<int>   liqSwingLowBars    = array.new_int()
+
+var array<line>  liqLines      = array.new_line()
+var array<label> liqLabels     = array.new_label()
+var array<float> liqLevels     = array.new_float()
+var array<int>   liqDirections = array.new_int()
+var array<bool>  liqSwept      = array.new_bool()
+var array<int>   liqStartBars  = array.new_int()
+
+var string lastLiquidityEvent = "—"
+
+bool eqhFormedEvent = false
+bool eqlFormedEvent = false
+bool eqhSweepEvent  = false
+bool eqlSweepEvent  = false
+
+float liqAtr = ta.atr(14)
+float liqTolerance = liqAtr * liqToleranceAtrMult
+
+// Returns index of an unswept pool near level+direction, or -1.
+findNearbyLiquidityIndex(float level, int direction) =>
+    int foundIndex = -1
+    if array.size(liqLevels) > 0
+        for i = 0 to array.size(liqLevels) - 1
+            bool sameDirection = array.get(liqDirections, i) == direction
+            bool nearby = math.abs(array.get(liqLevels, i) - level) <= liqTolerance
+            bool unswept = not array.get(liqSwept, i)
+            if sameDirection and nearby and unswept
+                foundIndex := i
+                break
+    foundIndex
+
+if newPivotHigh
+    array.push(liqSwingHighPrices, pivotHigh)
+    array.push(liqSwingHighBars, bar_index - pivotLength)
+
+    while array.size(liqSwingHighPrices) > liqSwingHistory
+        array.remove(liqSwingHighPrices, 0)
+        array.remove(liqSwingHighBars, 0)
+
+    if array.size(liqSwingHighPrices) >= 2
+        float newestHigh = array.get(liqSwingHighPrices, array.size(liqSwingHighPrices) - 1)
+        int newestHighBar = array.get(liqSwingHighBars, array.size(liqSwingHighBars) - 1)
+
+        for i = 0 to array.size(liqSwingHighPrices) - 2
+            float priorHigh = array.get(liqSwingHighPrices, i)
+            int priorHighBar = array.get(liqSwingHighBars, i)
+
+            if math.abs(newestHigh - priorHigh) <= liqTolerance
+                float eqhLevel = math.max(newestHigh, priorHigh)
+                int eqhStartBar = math.min(newestHighBar, priorHighBar)
+                int existingEqh = findNearbyLiquidityIndex(eqhLevel, 1)
+
+                if existingEqh >= 0
+                    float mergedEqh = math.max(eqhLevel, array.get(liqLevels, existingEqh))
+                    array.set(liqLevels, existingEqh, mergedEqh)
+                    array.set(liqStartBars, existingEqh, math.min(eqhStartBar, array.get(liqStartBars, existingEqh)))
+
+                    line existingEqhLine = array.get(liqLines, existingEqh)
+                    if not na(existingEqhLine)
+                        line.set_y1(existingEqhLine, mergedEqh)
+                        line.set_y2(existingEqhLine, mergedEqh)
+                        line.set_x1(existingEqhLine, array.get(liqStartBars, existingEqh))
+                        line.set_x2(existingEqhLine, bar_index)
+                        line.set_extend(existingEqhLine, extend.right)
+
+                    label existingEqhLabel = array.get(liqLabels, existingEqh)
+                    if not na(existingEqhLabel)
+                        label.set_xy(existingEqhLabel, array.get(liqStartBars, existingEqh), mergedEqh)
+                else
+                    line eqhLine = na
+                    label eqhTag = na
+
+                    if showLiquidity
+                        eqhLine := line.new(
+                             eqhStartBar,
+                             eqhLevel,
+                             bar_index,
+                             eqhLevel,
+                             xloc = xloc.bar_index,
+                             extend = extend.right,
+                             style = line.style_dotted,
+                             color = color.new(bearishColor, 25),
+                             width = 1
+                        )
+
+                        if showLiquidityLabels
+                            eqhTag := label.new(
+                                 eqhStartBar,
+                                 eqhLevel,
+                                 "EQH",
+                                 style = label.style_label_down,
+                                 color = color.new(bearishColor, 20),
+                                 textcolor = color.white,
+                                 size = size.tiny
+                            )
+
+                    array.push(liqLines, eqhLine)
+                    array.push(liqLabels, eqhTag)
+                    array.push(liqLevels, eqhLevel)
+                    array.push(liqDirections, 1)
+                    array.push(liqSwept, false)
+                    array.push(liqStartBars, eqhStartBar)
+
+                    while array.size(liqLevels) > maxLiquidityLevels
+                        line oldLiqLine = array.get(liqLines, 0)
+                        label oldLiqLabel = array.get(liqLabels, 0)
+                        if not na(oldLiqLine)
+                            line.delete(oldLiqLine)
+                        if not na(oldLiqLabel)
+                            label.delete(oldLiqLabel)
+                        array.remove(liqLines, 0)
+                        array.remove(liqLabels, 0)
+                        array.remove(liqLevels, 0)
+                        array.remove(liqDirections, 0)
+                        array.remove(liqSwept, 0)
+                        array.remove(liqStartBars, 0)
+
+                    lastLiquidityEvent := "EQH"
+                    eqhFormedEvent := true
+
+                break
+
+if newPivotLow
+    array.push(liqSwingLowPrices, pivotLow)
+    array.push(liqSwingLowBars, bar_index - pivotLength)
+
+    while array.size(liqSwingLowPrices) > liqSwingHistory
+        array.remove(liqSwingLowPrices, 0)
+        array.remove(liqSwingLowBars, 0)
+
+    if array.size(liqSwingLowPrices) >= 2
+        float newestLow = array.get(liqSwingLowPrices, array.size(liqSwingLowPrices) - 1)
+        int newestLowBar = array.get(liqSwingLowBars, array.size(liqSwingLowBars) - 1)
+
+        for i = 0 to array.size(liqSwingLowPrices) - 2
+            float priorLow = array.get(liqSwingLowPrices, i)
+            int priorLowBar = array.get(liqSwingLowBars, i)
+
+            if math.abs(newestLow - priorLow) <= liqTolerance
+                float eqlLevel = math.min(newestLow, priorLow)
+                int eqlStartBar = math.min(newestLowBar, priorLowBar)
+                int existingEql = findNearbyLiquidityIndex(eqlLevel, -1)
+
+                if existingEql >= 0
+                    float mergedEql = math.min(eqlLevel, array.get(liqLevels, existingEql))
+                    array.set(liqLevels, existingEql, mergedEql)
+                    array.set(liqStartBars, existingEql, math.min(eqlStartBar, array.get(liqStartBars, existingEql)))
+
+                    line existingEqlLine = array.get(liqLines, existingEql)
+                    if not na(existingEqlLine)
+                        line.set_y1(existingEqlLine, mergedEql)
+                        line.set_y2(existingEqlLine, mergedEql)
+                        line.set_x1(existingEqlLine, array.get(liqStartBars, existingEql))
+                        line.set_x2(existingEqlLine, bar_index)
+                        line.set_extend(existingEqlLine, extend.right)
+
+                    label existingEqlLabel = array.get(liqLabels, existingEql)
+                    if not na(existingEqlLabel)
+                        label.set_xy(existingEqlLabel, array.get(liqStartBars, existingEql), mergedEql)
+                else
+                    line eqlLine = na
+                    label eqlTag = na
+
+                    if showLiquidity
+                        eqlLine := line.new(
+                             eqlStartBar,
+                             eqlLevel,
+                             bar_index,
+                             eqlLevel,
+                             xloc = xloc.bar_index,
+                             extend = extend.right,
+                             style = line.style_dotted,
+                             color = color.new(bullishColor, 25),
+                             width = 1
+                        )
+
+                        if showLiquidityLabels
+                            eqlTag := label.new(
+                                 eqlStartBar,
+                                 eqlLevel,
+                                 "EQL",
+                                 style = label.style_label_up,
+                                 color = color.new(bullishColor, 20),
+                                 textcolor = color.white,
+                                 size = size.tiny
+                            )
+
+                    array.push(liqLines, eqlLine)
+                    array.push(liqLabels, eqlTag)
+                    array.push(liqLevels, eqlLevel)
+                    array.push(liqDirections, -1)
+                    array.push(liqSwept, false)
+                    array.push(liqStartBars, eqlStartBar)
+
+                    while array.size(liqLevels) > maxLiquidityLevels
+                        line oldLiqLine = array.get(liqLines, 0)
+                        label oldLiqLabel = array.get(liqLabels, 0)
+                        if not na(oldLiqLine)
+                            line.delete(oldLiqLine)
+                        if not na(oldLiqLabel)
+                            label.delete(oldLiqLabel)
+                        array.remove(liqLines, 0)
+                        array.remove(liqLabels, 0)
+                        array.remove(liqLevels, 0)
+                        array.remove(liqDirections, 0)
+                        array.remove(liqSwept, 0)
+                        array.remove(liqStartBars, 0)
+
+                    lastLiquidityEvent := "EQL"
+                    eqlFormedEvent := true
+
+                break
+
+// Extend unswept liquidity lines and detect confirmed sweeps.
+if barstate.isconfirmed and array.size(liqLevels) > 0
+    for i = array.size(liqLevels) - 1 to 0
+        bool alreadySwept = array.get(liqSwept, i)
+        float level = array.get(liqLevels, i)
+        int direction = array.get(liqDirections, i)
+        line liqLine = array.get(liqLines, i)
+
+        if not alreadySwept
+            if not na(liqLine)
+                line.set_x2(liqLine, bar_index)
+
+            // direction 1 = EQH / buy-side liquidity above highs
+            // direction -1 = EQL / sell-side liquidity below lows
+            bool sweptEqh = direction == 1 and high > level and close < level
+            bool sweptEql = direction == -1 and low < level and close > level
+
+            if sweptEqh or sweptEql
+                array.set(liqSwept, i, true)
+
+                if not na(liqLine)
+                    line.set_extend(liqLine, extend.none)
+                    line.set_x2(liqLine, bar_index)
+                    line.set_style(liqLine, line.style_dashed)
+                    line.set_color(
+                         liqLine,
+                         color.new(neutralColor, 35)
+                    )
+
+                if sweptEqh
+                    lastLiquidityEvent := "EQH Sweep"
+                    eqhSweepEvent := true
+
+                    if showSweepLabels
+                        label.new(
+                             bar_index,
+                             high,
+                             "EQH Sweep",
+                             style = label.style_label_down,
+                             color = color.new(bearishColor, 10),
+                             textcolor = color.white,
+                             size = size.tiny
+                        )
+                else
+                    lastLiquidityEvent := "EQL Sweep"
+                    eqlSweepEvent := true
+
+                    if showSweepLabels
+                        label.new(
+                             bar_index,
+                             low,
+                             "EQL Sweep",
+                             style = label.style_label_up,
+                             color = color.new(bullishColor, 10),
+                             textcolor = color.white,
+                             size = size.tiny
+                        )
+
+
+//====================================================================
 // CORE BIAS ENGINE
 //====================================================================
 //
 // Intentionally unchanged from v0.1 scoring so Phase 1 bias behavior
-// remains stable. Later confidence phases may incorporate OB / FVG state.
+// remains stable. Later confidence phases may incorporate OB / FVG / Liq.
 //====================================================================
 
 int bullishPoints = 0
@@ -1187,7 +1541,7 @@ float alignmentScore =
 
 
 //====================================================================
-// LAST EVENT / OB / FVG COLORS
+// LAST EVENT / OB / FVG / LIQUIDITY COLORS
 //====================================================================
 
 color lastEventColor =
@@ -1205,6 +1559,11 @@ color lastFvgColor =
      str.contains(lastFvgEvent, "Bearish") ? bearishColor :
      neutralColor
 
+color lastLiquidityColor =
+     str.contains(lastLiquidityEvent, "EQL") ? bullishColor :
+     str.contains(lastLiquidityEvent, "EQH") ? bearishColor :
+     neutralColor
+
 
 //====================================================================
 // DASHBOARD
@@ -1213,7 +1572,7 @@ color lastFvgColor =
 var table dashboard = table.new(
      position.top_right,
      2,
-     10,
+     11,
      bgcolor = color.new(color.black, 15),
      frame_color = color.new(color.white, 70),
      frame_width = 1,
@@ -1243,7 +1602,7 @@ if barstate.islast
              dashboard,
              1,
              0,
-             "v0.4",
+             "v0.5",
              text_color = color.silver,
              bgcolor = color.new(color.black, 0),
              text_size = size.small
@@ -1350,14 +1709,14 @@ if barstate.islast
         )
 
         //------------------------------------------------------------
-        // LAST HIGH
+        // LAST LIQUIDITY
         //------------------------------------------------------------
 
         table.cell(
              dashboard,
              0,
              6,
-             "Last High",
+             "Last Liq",
              text_color = color.silver
         )
 
@@ -1365,6 +1724,26 @@ if barstate.islast
              dashboard,
              1,
              6,
+             lastLiquidityEvent,
+             text_color = lastLiquidityColor
+        )
+
+        //------------------------------------------------------------
+        // LAST HIGH
+        //------------------------------------------------------------
+
+        table.cell(
+             dashboard,
+             0,
+             7,
+             "Last High",
+             text_color = color.silver
+        )
+
+        table.cell(
+             dashboard,
+             1,
+             7,
              lastHighType,
              text_color =
                  lastHighType == "HH"
@@ -1381,7 +1760,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             7,
+             8,
              "Last Low",
              text_color = color.silver
         )
@@ -1389,7 +1768,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             7,
+             8,
              lastLowType,
              text_color =
                  lastLowType == "HL"
@@ -1406,7 +1785,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             8,
+             9,
              "Alignment",
              text_color = color.silver
         )
@@ -1414,7 +1793,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             8,
+             9,
              str.tostring(
                  alignmentScore,
                  "#"
@@ -1429,7 +1808,7 @@ if barstate.islast
         table.cell(
              dashboard,
              0,
-             9,
+             10,
              "Bias",
              text_color = color.silver
         )
@@ -1437,7 +1816,7 @@ if barstate.islast
         table.cell(
              dashboard,
              1,
-             9,
+             10,
              marketBias,
              text_color = marketBiasColor,
              bgcolor = color.new(
@@ -1453,7 +1832,7 @@ if barstate.islast
              0,
              0,
              1,
-             9
+             10
         )
 
 
@@ -1461,8 +1840,8 @@ if barstate.islast
 // ALERTS
 //====================================================================
 //
-// One-bar pulses only. Structure, OB, and FVG events inherit the
-// confirmed-close non-repainting policy from earlier engines.
+// One-bar pulses only. Structure, OB, FVG, and Liquidity events inherit
+// the confirmed-close non-repainting policy from earlier engines.
 //====================================================================
 
 alertcondition(
@@ -1559,4 +1938,28 @@ alertcondition(
      bearishFvgFilledEvent,
      title = "Bearish FVG Filled",
      message = "AlphaFX AI: Bearish Fair Value Gap filled"
+)
+
+alertcondition(
+     eqhFormedEvent,
+     title = "Equal Highs",
+     message = "AlphaFX AI: Equal High liquidity pool formed"
+)
+
+alertcondition(
+     eqlFormedEvent,
+     title = "Equal Lows",
+     message = "AlphaFX AI: Equal Low liquidity pool formed"
+)
+
+alertcondition(
+     eqhSweepEvent,
+     title = "EQH Sweep",
+     message = "AlphaFX AI: Equal High liquidity swept"
+)
+
+alertcondition(
+     eqlSweepEvent,
+     title = "EQL Sweep",
+     message = "AlphaFX AI: Equal Low liquidity swept"
 )
